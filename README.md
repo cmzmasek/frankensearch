@@ -77,7 +77,7 @@ drowns out another.
 | Option | Meaning |
 |--------|---------|
 | `-n, --num-hits` | Top hits to report **per (query, species)** (default 10). |
-| `--identity-denominator {alignment,query}` | Which ratio to **rank** by (both are always reported). |
+| `--rank-by {identity-alignment,identity-query,alignment-length}` | How to **rank** hits within each (query, species) group: identity ÷ alignment length (default), identity ÷ query length, or longest alignment first. Both ratios and the alignment length are always reported. |
 | `--matrix {identity,pam30,blosum45,blosum62}` | Scoring matrix; `identity` (built-in pure-identity) is the default. |
 | `--ungapped` | Ungapped alignments only. |
 | `--remote` | Search NCBI remotely instead of using local databases (see below). |
@@ -89,15 +89,22 @@ drowns out another.
 
 ## Output
 
-Two files are written per run (`<prefix>.tsv` and `<prefix>.txt`):
+Three files are written per run, sharing the `-o/--output` prefix:
 
-- **`.txt`** — human-readable, grouped by query then species, with the BLAST-style
-  pairwise alignment for every hit.
+- **`.txt`** — human-readable, in two sections: (1) a table of every hit (query,
+  species, target, **both** identity ratios, alignment length, bit score, E-value,
+  query/subject start–end coordinates, and a final **match** column), then (2) the
+  BLAST-style pairwise alignments grouped by query then species. The match column /
+  middle "match" line shows the query residue where the two sequences are identical
+  and a dot (`.`) where they differ (e.g. `MKL.EV`).
 - **`.tsv`** — one row per hit for downstream processing, with columns including the
   query ID, queried taxid + species, target accession + name, **both** identity
   ratios (over alignment length and over query length), bit score, E-value,
   alignment coordinates, and the alignment itself (as a single field with newlines
   escaped as `\n`).
+- **`.summary.md`** — a methods-grade record of the run (command, input checksum,
+  per-species database provenance, full effective parameters, software versions,
+  references, and a ready-to-paste Methods paragraph).
 
 > E-value is reported for reference only; it is never used to filter results.
 

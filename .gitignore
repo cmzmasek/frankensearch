@@ -35,7 +35,7 @@ out1.txt
 
 # Local scratch and private sequence data (not for the public repo)
 as_sars_1.tsv
-test_1.tsv
+test_*.tsv
 *~
 
 # Editor / OS cruft

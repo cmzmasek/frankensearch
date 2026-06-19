@@ -8,6 +8,7 @@ from frankensearch import database, uniprot
 from frankensearch.errors import UserError
 from frankensearch.inputs import Query
 from frankensearch.search import (
+    Hit,
     SearchParams,
     blastp_command,
     parse_subject,
@@ -62,11 +63,37 @@ def test_blastp_command_remote_falls_back_to_pam30():
     assert "PAM30" in cmd
 
 
+def _hit(*, nident, align_len, query_len=100):
+    return Hit(
+        query_id="q", query_len=query_len, taxid=9606, species="Homo sapiens",
+        subject_id="s", accession="A", target_name="t",
+        nident=nident, align_len=align_len, bitscore=float(nident), evalue=1.0,
+        qstart=1, qend=align_len, sstart=1, send=align_len,
+        qseq="A" * align_len, sseq="A" * align_len,
+    )
+
+
+def test_sort_key_ranking_modes():
+    short_exact = _hit(nident=10, align_len=10)   # 100% over a short alignment
+    long_partial = _hit(nident=40, align_len=80)  # 50% over a long alignment
+    hits = [short_exact, long_partial]
+
+    by_aln_id = sorted(hits, key=lambda h: h.sort_key("identity-alignment"), reverse=True)
+    assert by_aln_id[0] is short_exact  # higher identity wins
+
+    by_query_id = sorted(hits, key=lambda h: h.sort_key("identity-query"), reverse=True)
+    assert by_query_id[0] is long_partial  # 40/100 > 10/100 of the query
+
+    by_len = sorted(hits, key=lambda h: h.sort_key("alignment-length"), reverse=True)
+    assert by_len[0] is long_partial  # longest alignment wins
+
+
 def test_render_alignment_marks_identities_and_coords():
     text = render_alignment("ABCD", "ABXD", qstart=1, sstart=1)
     lines = text.splitlines()
     assert lines[0].startswith("Query") and lines[0].rstrip().endswith("4")
-    assert "AB D" in lines[1]  # midline: identical letters, space at the mismatch
+    assert lines[1].startswith("Match")  # the middle line is labelled "Match"
+    assert "AB.D" in lines[1]  # match line: identical letters, dot at the mismatch
     assert lines[2].startswith("Sbjct")
 
 

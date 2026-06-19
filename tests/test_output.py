@@ -77,6 +77,59 @@ def test_write_txt_groups_and_includes_alignment(tmp_path):
     assert "Query" in text and "Sbjct" in text
 
 
+def test_write_txt_has_hit_table_with_coordinates(tmp_path):
+    path = tmp_path / "out.txt"
+    output.write_txt(
+        [_hit(qseq="MQIFVKT", sseq="MQIFVKT")],
+        path,
+        queries=[QUERY],
+        taxa=[TAXON],
+        params=SearchParams(num_hits=3, rank_by="identity-query"),
+        input_path=tmp_path / "in.fasta",
+    )
+    text = path.read_text()
+    # The HITS table carries the alignment-length and coordinate columns and marks
+    # the ranked column.
+    header = next(line for line in text.splitlines() if line.startswith("Query"))
+    for col in ("Accession", "Aln len", "Qstart", "Qend", "Sstart", "Send", "Bits", "Match"):
+        assert col in header
+    assert header.rstrip().endswith("Match")  # match line is the last column
+    assert "%id/qry <" in header  # ranked column flagged
+    assert "%id/aln <" not in header and "Aln len <" not in header  # only one column flagged
+    assert "ALIGNMENTS" in text
+
+
+def test_hit_table_ranked_by_alignment_length_flags_aln_column(tmp_path):
+    path = tmp_path / "out.txt"
+    output.write_txt(
+        [_hit()],
+        path,
+        queries=[QUERY],
+        taxa=[TAXON],
+        params=SearchParams(num_hits=3, rank_by="alignment-length"),
+        input_path=tmp_path / "in.fasta",
+    )
+    text = path.read_text()
+    assert "Aln len <" in text  # alignment-length column flagged as the ranking column
+    assert "%id/aln <" not in text and "%id/qry <" not in text  # only one column flagged
+    assert "Ranked by:  alignment length" in text
+
+
+def test_hit_table_match_column_shows_dots(tmp_path):
+    path = tmp_path / "out.txt"
+    output.write_txt(
+        [_hit(qseq="KLVEV-SDT", sseq="KLAEVGSDT", nident=7, align_len=9)],
+        path,
+        queries=[QUERY],
+        taxa=[TAXON],
+        params=SearchParams(num_hits=3),
+        input_path=tmp_path / "in.fasta",
+    )
+    # The Match column carries the dotted match string in the (single) data row.
+    hits_section = path.read_text().split("ALIGNMENTS")[0]
+    assert any(line.rstrip().endswith("KL.EV.SDT") for line in hits_section.splitlines())
+
+
 def test_write_txt_notes_taxon_with_no_hits(tmp_path):
     path = tmp_path / "out.txt"
     output.write_txt(

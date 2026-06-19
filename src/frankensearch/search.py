@@ -43,7 +43,8 @@ class SearchParams:
     evalue: float = 200000.0
     word_size: int = 2
     max_target_seqs: int = 5000
-    identity_denominator: str = "alignment"  # "alignment" or "query"
+    # How to rank hits: "identity-alignment", "identity-query", or "alignment-length".
+    rank_by: str = "identity-alignment"
     num_hits: int = 10
     remote: bool = False
     seg: bool = False  # low-complexity (SEG) filtering; off by default
@@ -77,10 +78,26 @@ class Hit:
     def identity_over_query(self) -> float:
         return self.nident / self.query_len if self.query_len else 0.0
 
-    def ratio(self, denominator: str) -> float:
-        if denominator == "query":
-            return self.identity_over_query
-        return self.identity_over_alignment
+    def sort_key(self, rank_by: str) -> tuple:
+        """Descending sort key for the chosen ranking mode (use reverse=True).
+
+        Ties fall back to bit score, then to the (lower) E-value. For the two
+        identity modes we first prefer the longer alignment, so a high-identity
+        match over more residues outranks the same identity over fewer; in
+        ``alignment-length`` mode that fallback is implied by the primary key.
+        """
+        if rank_by == "alignment-length":
+            return (self.align_len, self.bitscore, -self.evalue)
+        primary = (
+            self.identity_over_query
+            if rank_by == "identity-query"
+            else self.identity_over_alignment
+        )
+        return (primary, self.align_len, self.bitscore, -self.evalue)
+
+    @property
+    def match_line(self) -> str:
+        return match_string(self.qseq, self.sseq)
 
     @property
     def alignment_text(self) -> str:
@@ -135,10 +152,7 @@ def run_search(
             hits = grouped.get((query.id, taxon.taxid), [])
             if len({h.subject_id for h in hits}) >= params.max_target_seqs:
                 capped += 1
-            hits.sort(
-                key=lambda h: (h.ratio(params.identity_denominator), h.bitscore, -h.evalue),
-                reverse=True,
-            )
+            hits.sort(key=lambda h: h.sort_key(params.rank_by), reverse=True)
             results.extend(hits[: params.num_hits])
 
     if capped and on_warning is not None:
@@ -256,21 +270,33 @@ def parse_subject(sseqid: str, stitle: str) -> tuple[str, str]:
     return accession, name or accession
 
 
+def match_string(qseq: str, sseq: str) -> str:
+    """The "match" line: the query residue where query and subject are identical
+    and a dot (``.``) at every non-identical column (incl. gaps), e.g. ``MKL.EV``.
+
+    ``qseq`` and ``sseq`` are aligned strings and must be the same length (BLAST
+    pairwise output always is); ``strict=True`` turns any mismatch into a loud
+    error rather than a silently truncated match line.
+    """
+    return "".join(
+        q if q == s and q != "-" else "." for q, s in zip(qseq, sseq, strict=True)
+    )
+
+
 def render_alignment(qseq: str, sseq: str, qstart: int, sstart: int, width: int = 60) -> str:
-    """Render a BLAST-website-style pairwise alignment (query / midline / subject)."""
+    """Render a BLAST-website-style pairwise alignment (query / match / subject)."""
+    full_match = match_string(qseq, sseq)
     lines: list[str] = []
     qpos, spos = qstart, sstart
     for i in range(0, len(qseq), width):
         qchunk, schunk = qseq[i : i + width], sseq[i : i + width]
-        midline = "".join(
-            q if q == s and q != "-" else " " for q, s in zip(qchunk, schunk, strict=False)
-        )
+        midline = full_match[i : i + width]
         q_nongap = sum(1 for c in qchunk if c != "-")
         s_nongap = sum(1 for c in schunk if c != "-")
         q_end = qpos + q_nongap - 1 if q_nongap else qpos
         s_end = spos + s_nongap - 1 if s_nongap else spos
         lines.append(f"Query  {qpos:>6}  {qchunk}  {q_end}")
-        lines.append(f"       {'':>6}  {midline}")
+        lines.append(f"Match  {'':>6}  {midline}")
         lines.append(f"Sbjct  {spos:>6}  {schunk}  {s_end}")
         lines.append("")
         qpos += q_nongap

@@ -15,7 +15,7 @@ from rich.table import Table
 from . import __version__, blast, database, inputs, paths, scoring, uniprot
 from .errors import FrankensearchError, UserError
 from .inputs import Query
-from .output import output_paths, write_outputs
+from .output import HIT_COLUMNS, cell_text, hit_column_header, output_paths, write_outputs
 from .runtime import STATE
 from .search import Hit, SearchParams, run_search
 from .taxonomy import Taxon, TaxonomyResolver, TaxonomyUnavailable
@@ -47,9 +47,10 @@ class Matrix(str, Enum):
     blosum62 = "blosum62"
 
 
-class IdentityDenominator(str, Enum):
-    alignment = "alignment"
-    query = "query"
+class RankBy(str, Enum):
+    identity_alignment = "identity-alignment"
+    identity_query = "identity-query"
+    alignment_length = "alignment-length"
 
 
 class ProteomeSet(str, Enum):
@@ -112,10 +113,16 @@ def search(
     num_hits: int = typer.Option(
         10, "-n", "--num-hits", min=1, help="Top hits to report per query, per species."
     ),
-    identity_denominator: IdentityDenominator = typer.Option(
-        IdentityDenominator.alignment,
-        "--identity-denominator",
-        help="Identity-ratio denominator used to RANK hits (both are always reported).",
+    rank_by: RankBy = typer.Option(
+        RankBy.identity_alignment,
+        "--rank-by",
+        help=(
+            "How to rank hits within each (query, species) group: "
+            "'identity-alignment' (identical residues ÷ alignment length, default), "
+            "'identity-query' (identical residues ÷ query length), or "
+            "'alignment-length' (longest alignment first). Both identity ratios and the "
+            "alignment length are always reported regardless."
+        ),
     ),
     matrix: Matrix = typer.Option(
         Matrix.identity,
@@ -188,7 +195,7 @@ def search(
     table.add_row("Queries", str(len(parsed.records)))
     table.add_row("Taxids", ", ".join(str(t) for t in taxid_list))
     table.add_row("Top hits per query/species", str(num_hits))
-    table.add_row("Rank by identity over", identity_denominator.value)
+    table.add_row("Rank by", rank_by.value)
     table.add_row("Matrix", matrix_desc)
     table.add_row("Gaps", scoring.gap_description(matrix.value, ungapped=ungapped))
     table.add_row("SEG filter", "on" if seg else "off")
@@ -227,7 +234,7 @@ def search(
         evalue=evalue,
         word_size=word_size,
         max_target_seqs=max_target_seqs,
-        identity_denominator=identity_denominator.value,
+        rank_by=rank_by.value,
         num_hits=num_hits,
         remote=remote,
         seg=seg,
@@ -253,7 +260,7 @@ def search(
                 db_metadata[taxon.taxid] = meta
     command = "frankensearch " + " ".join(shlex.quote(arg) for arg in sys.argv[1:])
 
-    _print_results(hits, identity_denominator.value)
+    _print_results(hits, rank_by.value)
     write_outputs(
         hits,
         out_prefix,
@@ -362,32 +369,20 @@ def _check_no_overwrite(paths: tuple[Path, ...], force: bool) -> None:
         )
 
 
-def _print_results(hits: list[Hit], denominator: str, limit: int = 20) -> None:
+def _print_results(hits: list[Hit], rank_by: str, limit: int = 20) -> None:
     if not hits:
         console.print("\n[yellow]No hits found.[/]")
         return
-    table = Table(title="Top hits (ranked by identity)", title_style="bold cyan")
-    table.add_column("Query")
-    table.add_column("Species")
-    table.add_column("Accession")
-    table.add_column("Target", overflow="fold", max_width=40)
-    aln_header = "%id/aln" + ("  ◄" if denominator == "alignment" else "")
-    qry_header = "%id/qry" + ("  ◄" if denominator == "query" else "")
-    table.add_column(aln_header, justify="right")
-    table.add_column(qry_header, justify="right")
-    table.add_column("Bits", justify="right")
-    table.add_column("E-value", justify="right")
+    table = Table(title=f"Top hits (ranked by {rank_by})", title_style="bold cyan")
+    columns = [col for col in HIT_COLUMNS if col.in_console]
+    for col in columns:
+        header = hit_column_header(col, rank_by)
+        if col.max_width is not None:  # long text: truncate to one line, like the .txt table
+            table.add_column(header, no_wrap=True, max_width=col.max_width)
+        else:
+            table.add_column(header, justify="right" if col.numeric else "left")
     for hit in hits[:limit]:
-        table.add_row(
-            hit.query_id,
-            hit.species,
-            hit.accession,
-            hit.target_name,
-            f"{hit.identity_over_alignment * 100:.1f}",
-            f"{hit.identity_over_query * 100:.1f}",
-            f"{hit.bitscore:.0f}",
-            f"{hit.evalue:.1e}",
-        )
+        table.add_row(*(cell_text(col, hit) for col in columns))
     console.print(table)
     if len(hits) > limit:
         console.print(f"[dim]... and {len(hits) - limit} more (see the .txt / .tsv files).[/]")

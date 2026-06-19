@@ -1,13 +1,18 @@
 """Write search results to a machine-readable .tsv and a human-readable .txt.
 
-Both files carry the alignment: the .tsv encodes it as a single field (newlines
-escaped as ``\\n``), the .txt shows the multi-line BLAST-style view.
+The .txt has two sections: a fixed-width table of every hit (one row per hit,
+mirroring the console view plus query/subject coordinates) followed by the
+multi-line BLAST-style pairwise alignments grouped by query then species. Both
+files carry the alignment; the .tsv encodes it as a single field (newlines
+escaped as ``\\n``).
 """
 
 from __future__ import annotations
 
 import csv
 import hashlib
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -49,9 +54,61 @@ TSV_COLUMNS = [
 ]
 
 
+_RANK_LABELS = {
+    "identity-alignment": "identity over alignment length",
+    "identity-query": "identity over query length",
+    "alignment-length": "alignment length",
+}
+
+# ASCII so the fixed-width .txt table aligns in every terminal (a Unicode arrow is
+# East-Asian-ambiguous width and would shift the column in some locales).
+RANK_MARK = "<"  # appended to the header of the column the hits are ranked by
+
+
+@dataclass(frozen=True)
+class HitColumn:
+    """One column of the per-hit results table, shared by the console and .txt views."""
+
+    header: str
+    value: Callable[[Hit], str]
+    numeric: bool = False  # right-aligned in the .txt table / console
+    rank_flag: str | None = None  # the rank_by value that flags this column
+    max_width: int | None = None  # truncate (.txt) / fold (console) long text
+    in_console: bool = True  # shown in the compact console preview
+
+
+# Single source of truth for the hit table. The console preview (cli._print_results)
+# uses the in_console subset; the .txt table (_hit_table) uses them all.
+HIT_COLUMNS: list[HitColumn] = [
+    HitColumn("Query", lambda h: h.query_id),
+    HitColumn("Species", lambda h: h.species),
+    HitColumn("Accession", lambda h: h.accession),
+    HitColumn("Target", lambda h: h.target_name, max_width=40),
+    HitColumn("%id/aln", lambda h: f"{h.identity_over_alignment * 100:.1f}",
+              numeric=True, rank_flag="identity-alignment"),
+    HitColumn("%id/qry", lambda h: f"{h.identity_over_query * 100:.1f}",
+              numeric=True, rank_flag="identity-query"),
+    HitColumn("Aln len", lambda h: str(h.align_len),
+              numeric=True, rank_flag="alignment-length"),
+    HitColumn("Bits", lambda h: f"{h.bitscore:.0f}", numeric=True),
+    HitColumn("E-value", lambda h: f"{h.evalue:.1e}", numeric=True),
+    HitColumn("Qstart", lambda h: str(h.qstart), numeric=True, in_console=False),
+    HitColumn("Qend", lambda h: str(h.qend), numeric=True, in_console=False),
+    HitColumn("Sstart", lambda h: str(h.sstart), numeric=True, in_console=False),
+    HitColumn("Send", lambda h: str(h.send), numeric=True, in_console=False),
+    # Free-form, .txt-only; last so its variable width never shifts other columns.
+    HitColumn("Match", lambda h: h.match_line, in_console=False),
+]
+
+
+def hit_column_header(col: HitColumn, rank_by: str) -> str:
+    """Header text, with the ranking marker appended when this is the ranked column."""
+    return col.header + (f" {RANK_MARK}" if col.rank_flag == rank_by else "")
+
+
 def _scoring_summary(params: SearchParams) -> tuple[str, str, str, str]:
     """Return (backend, matrix_label, gaps, ranked_by) describing the effective run."""
-    ranked_by = "query length" if params.identity_denominator == "query" else "alignment length"
+    ranked_by = _RANK_LABELS.get(params.rank_by, _RANK_LABELS["identity-alignment"])
     if params.remote:
         backend = "NCBI remote (nr)"
         gaps = "ungapped" if params.ungapped else "NCBI defaults"
@@ -157,7 +214,7 @@ def write_txt(
         f"Generated:  {datetime.now().strftime('%Y-%m-%d %H:%M')}",
         f"Backend:    {backend}",
         f"Matrix:     {matrix_label}    Gaps: {gaps}",
-        f"Ranked by:  identity over {ranked_by}",
+        f"Ranked by:  {ranked_by}",
         f"Top hits per (query, species): {params.num_hits}",
         "Note:       E-value is shown for reference only; results are NOT filtered by E-value.",
     ]
@@ -167,11 +224,17 @@ def write_txt(
             "differ from the queried taxid."
         )
 
+    # Section 1: one table of every hit (grouped by query then species in row order).
+    lines += ["", "=" * 80, "HITS", "=" * 80, ""]
+    lines += _hit_table(hits, params.rank_by) if hits else ["(no hits)"]
+
+    # Section 2: the BLAST-style pairwise alignments, grouped by query then species.
+    lines += ["", "=" * 80, "ALIGNMENTS", "=" * 80]
     for query in queries:
         lines.append("")
-        lines.append("=" * 80)
+        lines.append("-" * 80)
         lines.append(f"Query: {query.id}   (length {len(query.sequence)})")
-        lines.append("=" * 80)
+        lines.append("-" * 80)
         for taxon in taxa:
             lines.append("")
             lines.append(f"--- {taxon.name}  (taxid {taxon.taxid}) ---")
@@ -183,6 +246,43 @@ def write_txt(
                 lines.extend(_hit_block(rank, hit))
 
     path.write_text("\n".join(lines) + "\n")
+
+
+def _truncate(text: str, width: int) -> str:
+    # ASCII "..." keeps the fixed-width .txt table aligned in every terminal.
+    return text if len(text) <= width else text[: max(0, width - 3)] + "..."
+
+
+def cell_text(col: HitColumn, hit: Hit) -> str:
+    """The rendered string for one cell (truncated if the column caps its width)."""
+    text = col.value(hit)
+    return _truncate(text, col.max_width) if col.max_width is not None else text
+
+
+def _hit_table(hits: list[Hit], rank_by: str) -> list[str]:
+    """A fixed-width text table, one row per hit, driven by HIT_COLUMNS."""
+    headers = [hit_column_header(col, rank_by) for col in HIT_COLUMNS]
+    rows = [[cell_text(col, hit) for col in HIT_COLUMNS] for hit in hits]
+    return _format_table(headers, rows, numeric=[col.numeric for col in HIT_COLUMNS])
+
+
+def _format_table(headers: list[str], rows: list[list[str]], *, numeric: list[bool]) -> list[str]:
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+
+    def fmt(cells: list[str]) -> str:
+        # No rstrip: a full rectangular grid, so the rule underlines every column
+        # (incl. the wide trailing Match column) rather than stopping short.
+        return "  ".join(
+            cell.rjust(widths[i]) if numeric[i] else cell.ljust(widths[i])
+            for i, cell in enumerate(cells)
+        )
+
+    out = [fmt(headers), "  ".join("-" * w for w in widths)]
+    out += [fmt(row) for row in rows]
+    return out
 
 
 def _hit_block(rank: int, hit: Hit) -> list[str]:
@@ -304,7 +404,8 @@ def write_summary(
         f"- Max target sequences: {params.max_target_seqs}",
         f"- E-value cutoff: {params.evalue:g} "
         "(intentionally high — results are NOT filtered by E-value)",
-        f"- Ranking: by identity over {ranked_by} (both ratios are reported)",
+        f"- Ranking: by {ranked_by} "
+        "(both identity ratios and the alignment length are reported)",
         f"- Hits kept: top {params.num_hits} per (query, species)",
         "",
         "## Software versions",
@@ -334,7 +435,7 @@ def write_summary(
                 else f"the {matrix_label} scoring matrix"
             )
             + " with composition-based statistics disabled and no E-value cutoff; hits were "
-            f"ranked by percent identity over {ranked_by}. The top {params.num_hits} hits per "
+            f"ranked by {ranked_by}. The top {params.num_hits} hits per "
             "query per species were retained. "
             + (
                 "Targets were NCBI nr restricted to each species' taxonomy ID."
