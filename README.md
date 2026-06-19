@@ -151,3 +151,10 @@ Override the location with the `FRANKENSEARCH_HOME` environment variable.
 - **A taxid won't resolve** — check it at <https://www.ncbi.nlm.nih.gov/taxonomy>;
   taxonomy lookups need internet on first use (results are then cached).
 - For a full traceback when reporting a bug, re-run with `--debug`.
+
+---
+
+## License
+
+FRANKENSEARCH is free software, licensed under the **GNU General Public License
+v3.0** (GPL-3.0). See the [`LICENSE`](LICENSE) file for the full text.
