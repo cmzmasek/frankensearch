@@ -1,0 +1,45 @@
+# Local-only working notes — never commit
+CLAUDE.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.env
+
+# Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Data / build artifacts (BLAST DBs, fetched proteomes)
+*.phr
+*.pin
+*.psq
+*.pdb
+*.pot
+*.ptf
+*.pto
+data/
+blastdb/
+
+# Generated run outputs (.summary.md / .tsv / .txt written by `search`)
+*.summary.md
+out1.tsv
+out1.txt
+
+# Local scratch and private sequence data (not for the public repo)
+as_sars_1.tsv
+test_1.tsv
+*~
+
+# Editor / OS cruft
+.DS_Store
+
+# Claude Code local state
+.claude/
