@@ -150,6 +150,37 @@ Override the location with the `FRANKENSEARCH_HOME` environment variable.
 
 ---
 
+## Companion script: `extract_junctions.py`
+
+`extract_junctions.py` (in the project root) is a small standalone helper for
+preparing **junction peptides** to search. Given a motif (e.g. a linker), it
+extracts every occurrence of that motif plus a fixed number of flanking residues
+from your sequences and writes them as a FASTA — ready to feed to FRANKENSEARCH or
+paste into NCBI blastp.
+
+It reads a *folder* of input files (FASTA, or TSV/CSV with column 1 = name and
+column 2 = sequence; a header row and any extra columns are ignored), chosen by
+file extension, and writes one `<name>_<format>_extracted.fasta` per input file
+(the format is part of the name so same-named inputs of different formats don't
+overwrite each other).
+
+```sh
+python3 extract_junctions.py -i input_folder -o output_folder -m GGSGGGGSGG -f 14
+```
+
+| Option | Meaning |
+|--------|---------|
+| `-i, --input` | Folder of FASTA/TSV/CSV input files. |
+| `-o, --output` | Output folder (created if needed). |
+| `-m, --motif` | Motif to center each peptide on (matched literally; default `GGSGGGGSGG`). |
+| `-f, --flank` | Flanking residues kept on each side of the motif (default 14). |
+
+Each output record is one motif occurrence with its flanks, named
+`>input_file|sequence_name|motif_N|start_end`. Rows whose sequence contains
+non-amino-acid characters are skipped with a warning.
+
+---
+
 ## Troubleshooting
 
 - **"BLAST+ tools were not found"** — `conda activate frankensearch` (or install

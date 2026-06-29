@@ -30,13 +30,21 @@ blastdb/
 
 # Generated run outputs (.summary.md / .tsv / .txt written by `search`)
 *.summary.md
-out1.tsv
-out1.txt
+out*.tsv
+out*.txt
+
+# Generated junction-extraction output (extract_junctions.py)
+*_extracted.fasta
+fe_out/
 
 # Local scratch and private sequence data (not for the public repo)
 as_sars_1.tsv
 test_*.tsv
 *~
+
+# Local-only helper bundle (extract_junctions.py was moved to the repo root to
+# be tracked; this dir stays local)
+junction_extraction/
 
 # Editor / OS cruft
 .DS_Store
