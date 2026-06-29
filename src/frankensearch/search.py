@@ -51,6 +51,19 @@ class SearchParams:
 
 
 @dataclass
+class SearchResults:
+    """What a search produced.
+
+    * ``hits``  -- the top-N (``num_hits``) hits per (query, taxid), the main result.
+    * ``top1``  -- the single best hit per (query, taxid), plus any hits tied with
+      it on the full ranking (a true dead heat); never cut by ``num_hits``.
+    """
+
+    hits: list[Hit]
+    top1: list[Hit]
+
+
+@dataclass
 class Hit:
     query_id: str
     query_len: int
@@ -104,6 +117,23 @@ class Hit:
         return render_alignment(self.qseq, self.sseq, self.qstart, self.sstart)
 
 
+def top1_of_group(sorted_hits: list[Hit], rank_by: str) -> list[Hit]:
+    """From hits already sorted best-first, return the rank-1 hit plus any others
+    the ranking genuinely cannot separate from it -- i.e. hits with the identical
+    full sort key (the ``--rank-by`` metric, alignment length, bit score, and
+    E-value). Usually exactly one hit; more only on a true dead heat."""
+    if not sorted_hits:
+        return []
+    best_key = sorted_hits[0].sort_key(rank_by)
+    tied: list[Hit] = []
+    for hit in sorted_hits:
+        if hit.sort_key(rank_by) == best_key:
+            tied.append(hit)
+        else:
+            break  # sorted descending: once the key drops, nothing later ties
+    return tied
+
+
 def run_search(
     queries: list[Query],
     taxa: list[Taxon],
@@ -111,8 +141,8 @@ def run_search(
     *,
     db_dir: Path | None = None,
     on_warning: Callable[[str], None] | None = None,
-) -> list[Hit]:
-    """Search all queries against every taxon's database; return ranked hits."""
+) -> SearchResults:
+    """Search all queries against every taxon's database; return ranked results."""
     if find_tool("blastp") is None:
         raise DependencyError(
             "blastp (BLAST+) was not found on your PATH.",
@@ -146,6 +176,7 @@ def run_search(
                 grouped.setdefault((query.id, taxon.taxid), []).append(hit)
 
     results: list[Hit] = []
+    top1: list[Hit] = []
     capped = 0
     for query in queries:
         for taxon in taxa:
@@ -154,6 +185,7 @@ def run_search(
                 capped += 1
             hits.sort(key=lambda h: h.sort_key(params.rank_by), reverse=True)
             results.extend(hits[: params.num_hits])
+            top1.extend(top1_of_group(hits, params.rank_by))
 
     if capped and on_warning is not None:
         on_warning(
@@ -161,7 +193,7 @@ def run_search(
             f"({params.max_target_seqs}); some high-identity hits may be missing. "
             "Re-run with a higher --max-target-seqs to be sure."
         )
-    return results
+    return SearchResults(results, top1)
 
 
 def blastp_command(query_file: Path, taxon: Taxon, params: SearchParams, db_dir) -> list[str]:

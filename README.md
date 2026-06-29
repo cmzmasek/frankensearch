@@ -89,7 +89,7 @@ drowns out another.
 
 ## Output
 
-Three files are written per run, sharing the `-o/--output` prefix:
+Five files are written per run, sharing the `-o/--output` prefix:
 
 - **`.txt`** — human-readable, in two sections: (1) a table of every hit (query,
   species, target, **both** identity ratios, alignment length, bit score, E-value,
@@ -102,6 +102,10 @@ Three files are written per run, sharing the `-o/--output` prefix:
   ratios (over alignment length and over query length), bit score, E-value,
   alignment coordinates, and the alignment itself (as a single field with newlines
   escaped as `\n`).
+- **`_top1.txt` / `_top1.tsv`** — the same two views filtered to just the **single
+  best hit per (query, species)**. More than one row appears only on a genuine tie
+  (hits the ranking cannot separate at all). This is independent of `-n`, so a tie
+  is never dropped.
 - **`.summary.md`** — a methods-grade record of the run (command, input checksum,
   per-species database provenance, full effective parameters, software versions,
   references, and a ready-to-paste Methods paragraph).

@@ -123,12 +123,21 @@ def _scoring_summary(params: SearchParams) -> tuple[str, str, str, str]:
 
 
 def output_paths(out_prefix: Path) -> tuple[Path, Path, Path]:
-    """The three output files for a run: (.tsv, .txt, .summary.md)."""
+    """The three core output files for a run: (.tsv, .txt, .summary.md)."""
     base = out_prefix
     return (
         base.parent / f"{base.name}.tsv",
         base.parent / f"{base.name}.txt",
         base.parent / f"{base.name}.summary.md",
+    )
+
+
+def top1_output_paths(out_prefix: Path) -> tuple[Path, Path]:
+    """The two best-hit-only files for a run: (_top1.tsv, _top1.txt)."""
+    base = out_prefix
+    return (
+        base.parent / f"{base.name}_top1.tsv",
+        base.parent / f"{base.name}_top1.txt",
     )
 
 
@@ -144,9 +153,16 @@ def write_outputs(
     frankensearch_version: str,
     blast_versions: dict[str, str | None],
     db_metadata: dict[int, DbMetadata],
-) -> tuple[Path, Path, Path]:
-    """Write the .tsv, .txt, and summary.md; return their paths."""
+    top1_hits: list[Hit],
+) -> tuple[Path, Path, Path, Path, Path]:
+    """Write the five output files; return their paths.
+
+    Core: .tsv, .txt, .summary.md. Plus two best-hit-only views built from
+    ``top1_hits`` (the single best hit per query/species, all ties included):
+    _top1.tsv and _top1.txt.
+    """
     tsv_path, txt_path, summary_path = output_paths(out_prefix)
+    top1_tsv_path, top1_txt_path = top1_output_paths(out_prefix)
     tsv_path.parent.mkdir(parents=True, exist_ok=True)
     write_tsv(hits, tsv_path)
     write_txt(
@@ -170,11 +186,22 @@ def write_outputs(
         blast_versions=blast_versions,
         db_metadata=db_metadata,
     )
-    return tsv_path, txt_path, summary_path
+    write_tsv(top1_hits, top1_tsv_path)
+    write_txt(
+        top1_hits,
+        top1_txt_path,
+        queries=queries,
+        taxa=taxa,
+        params=params,
+        input_path=input_path,
+        db_metadata=db_metadata,
+        top1=True,
+    )
+    return tsv_path, txt_path, summary_path, top1_tsv_path, top1_txt_path
 
 
 def write_tsv(hits: list[Hit], path: Path) -> None:
-    with open(path, "w", newline="") as handle:
+    with open(path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
         writer.writerow(TSV_COLUMNS)
         for hit in hits:
@@ -233,14 +260,25 @@ def write_txt(
     params: SearchParams,
     input_path: Path,
     db_metadata: dict[int, DbMetadata] | None = None,
+    top1: bool = False,
 ) -> None:
     by_group: dict[tuple[str, int], list[Hit]] = {}
     for hit in hits:
         by_group.setdefault((hit.query_id, hit.taxid), []).append(hit)
 
     backend, matrix_label, gaps, ranked_by = _scoring_summary(params)
+    title = (
+        "FRANKENSEARCH results — best hit per query/species (ties included)"
+        if top1
+        else "FRANKENSEARCH results"
+    )
+    selection = (
+        "Selection:  best hit per (query, species); tied rank-1 hits all shown"
+        if top1
+        else f"Top hits per (query, species): {params.num_hits}"
+    )
     lines: list[str] = [
-        "FRANKENSEARCH results",
+        title,
         f"Input:      {input_path}",
         f"Generated:  {datetime.now().strftime('%Y-%m-%d %H:%M')}",
         f"Backend:    {backend}",
@@ -250,7 +288,7 @@ def write_txt(
     lines += [
         f"Matrix:     {matrix_label}    Gaps: {gaps}",
         f"Ranked by:  {ranked_by}",
-        f"Top hits per (query, species): {params.num_hits}",
+        selection,
         "Note:       E-value is shown for reference only; results are NOT filtered by E-value.",
     ]
     if params.remote:
@@ -280,7 +318,7 @@ def write_txt(
             for rank, hit in enumerate(group, start=1):
                 lines.extend(_hit_block(rank, hit))
 
-    path.write_text("\n".join(lines) + "\n")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _truncate(text: str, width: int) -> str:
@@ -482,4 +520,4 @@ def write_summary(
         ),
         "",
     ]
-    path.write_text("\n".join(lines) + "\n")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")

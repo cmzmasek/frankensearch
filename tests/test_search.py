@@ -14,6 +14,7 @@ from frankensearch.search import (
     parse_subject,
     render_alignment,
     run_search,
+    top1_of_group,
 )
 from frankensearch.taxonomy import Taxon
 
@@ -27,7 +28,60 @@ DB_FASTA = (
 TAXON = Taxon(9606, "Homo sapiens", "species")
 
 
+def _mk_hit(acc, nident, align_len, query_len=20, bitscore=50.0):
+    return Hit(
+        query_id="q", query_len=query_len, taxid=9606, species="Homo sapiens",
+        subject_id=f"sp|{acc}|X", accession=acc, target_name=acc,
+        nident=nident, align_len=align_len, bitscore=bitscore, evalue=1e-5,
+        qstart=1, qend=align_len, sstart=1, send=align_len,
+        qseq="A" * align_len, sseq="A" * align_len,
+    )
+
+
+def _ranked(hits, rank_by):
+    return sorted(hits, key=lambda h: h.sort_key(rank_by), reverse=True)
+
+
 # --- unit tests (no BLAST) ------------------------------------------------- #
+def test_top1_is_single_best_when_no_dead_heat():
+    # Shorter 100% matches do NOT tie the longest 100% match: the ranking prefers
+    # the longer alignment, so only the rank-1 hit is returned.
+    rank_by = "identity-alignment"
+    hits = _ranked(
+        [_mk_hit("P1", 20, 20), _mk_hit("P2", 8, 8), _mk_hit("P3", 5, 5), _mk_hit("P4", 18, 20)],
+        rank_by,
+    )
+    assert [h.accession for h in top1_of_group(hits, rank_by)] == ["P1"]
+
+
+def test_top1_reports_genuine_dead_heat():
+    # Two hits identical on identity, length, and bit score are a true tie; a
+    # lower-identity hit is excluded.
+    rank_by = "identity-alignment"
+    hits = _ranked(
+        [_mk_hit("A", 10, 10, bitscore=50.0), _mk_hit("B", 10, 10, bitscore=50.0),
+         _mk_hit("C", 9, 10, bitscore=45.0)],
+        rank_by,
+    )
+    assert {h.accession for h in top1_of_group(hits, rank_by)} == {"A", "B"}
+
+
+def test_top1_alignment_length_mode():
+    # Best by alignment length; the equal-length, equal-score hit ties, the
+    # shorter one does not.
+    rank_by = "alignment-length"
+    hits = _ranked(
+        [_mk_hit("A", 10, 30, bitscore=50.0), _mk_hit("B", 30, 30, bitscore=50.0),
+         _mk_hit("C", 25, 25, bitscore=50.0)],
+        rank_by,
+    )
+    assert {h.accession for h in top1_of_group(hits, rank_by)} == {"A", "B"}
+
+
+def test_top1_empty_group():
+    assert top1_of_group([], "identity-alignment") == []
+
+
 def test_parse_subject_uniprot():
     acc, name = parse_subject(
         "sp|P62987|RL40_HUMAN",
@@ -114,7 +168,7 @@ def built_db(tmp_path, monkeypatch):
 def test_run_search_finds_and_ranks(built_db):
     query = Query("frank1", "MQIFVKTLTGKTITLEVEPSDT")  # perfect substring of P1
     params = SearchParams(num_hits=5)
-    hits = run_search([query], [TAXON], params, db_dir=built_db)
+    hits = run_search([query], [TAXON], params, db_dir=built_db).hits
     assert hits
     top = hits[0]
     assert top.query_id == "frank1"
@@ -126,8 +180,17 @@ def test_run_search_finds_and_ranks(built_db):
 
 def test_run_search_respects_top_n(built_db):
     query = Query("frank1", "MQIFVKTLTGKTITLEVEPSDT")
-    hits = run_search([query], [TAXON], SearchParams(num_hits=1), db_dir=built_db)
+    hits = run_search([query], [TAXON], SearchParams(num_hits=1), db_dir=built_db).hits
     assert len(hits) <= 1
+
+
+def test_run_search_top1_is_best_hit(built_db):
+    query = Query("frank1", "MQIFVKTLTGKTITLEVEPSDT")
+    results = run_search([query], [TAXON], SearchParams(num_hits=5), db_dir=built_db)
+    assert results.top1  # at least the best hit per (query, species)
+    # every top1 hit ties the best identity ratio for its group
+    best = max(h.identity_over_alignment for h in results.top1)
+    assert all(h.identity_over_alignment == pytest.approx(best) for h in results.top1)
 
 
 def test_run_search_warns_when_max_target_seqs_hit(built_db):
@@ -156,5 +219,6 @@ def test_remote_skips_local_db_check(tmp_path, monkeypatch):
     monkeypatch.setattr(search_module, "_run_blastp", lambda *a, **k: [])
     query = Query("frank1", "MQIFVKTLTGKT")
     # tmp_path has no DB built; remote=True should not raise about a missing DB.
-    hits = run_search([query], [TAXON], SearchParams(remote=True), db_dir=tmp_path)
-    assert hits == []
+    results = run_search([query], [TAXON], SearchParams(remote=True), db_dir=tmp_path)
+    assert results.hits == []
+    assert results.top1 == []

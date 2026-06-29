@@ -197,10 +197,10 @@ def test_write_txt_remote_shows_backend_and_fallback(tmp_path):
     assert "non-redundant" in text
 
 
-def test_write_outputs_writes_three_files(tmp_path):
+def test_write_outputs_writes_five_files(tmp_path):
     input_file = tmp_path / "in.fasta"
     input_file.write_text(">frank1\nMQIFVKTLTGKTITLEVEPSDT\n")
-    tsv_path, txt_path, summary_path = output.write_outputs(
+    tsv_path, txt_path, summary_path, top1_tsv, top1_txt = output.write_outputs(
         [_hit()],
         tmp_path / "results",
         queries=[QUERY],
@@ -211,10 +211,17 @@ def test_write_outputs_writes_three_files(tmp_path):
         frankensearch_version="0.1.0",
         blast_versions=BLAST_VERSIONS,
         db_metadata={},
+        top1_hits=[_hit()],
     )
     assert tsv_path == tmp_path / "results.tsv" and tsv_path.exists()
     assert txt_path == tmp_path / "results.txt" and txt_path.exists()
     assert summary_path == tmp_path / "results.summary.md" and summary_path.exists()
+    assert top1_tsv == tmp_path / "results_top1.tsv" and top1_tsv.exists()
+    assert top1_txt == tmp_path / "results_top1.txt" and top1_txt.exists()
+    # The _top1.txt identifies itself and uses the best-hit selection wording.
+    top1_text = top1_txt.read_text()
+    assert "best hit per query/species" in top1_text
+    assert "Top hits per (query, species):" not in top1_text
 
 
 def test_write_summary_contains_methods_info(tmp_path):

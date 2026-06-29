@@ -15,7 +15,14 @@ from rich.table import Table
 from . import __version__, blast, database, inputs, paths, scoring, uniprot
 from .errors import FrankensearchError, UserError
 from .inputs import Query
-from .output import HIT_COLUMNS, cell_text, hit_column_header, output_paths, write_outputs
+from .output import (
+    HIT_COLUMNS,
+    cell_text,
+    hit_column_header,
+    output_paths,
+    top1_output_paths,
+    write_outputs,
+)
 from .runtime import STATE
 from .search import Hit, SearchParams, run_search
 from .taxonomy import Taxon, TaxonomyResolver, TaxonomyUnavailable
@@ -154,7 +161,8 @@ def search(
         None,
         "-o",
         "--output",
-        help="Output prefix; writes <prefix>.tsv/.txt/.summary.md. Defaults to the input name.",
+        help="Output prefix; writes <prefix>.tsv/.txt/.summary.md plus best-hit-only "
+        "<prefix>_top1.tsv/.txt. Defaults to the input name.",
     ),
     out_dir: Path = typer.Option(
         None,
@@ -204,7 +212,9 @@ def search(
     table.add_row("Max target seqs", str(max_target_seqs))
     table.add_row("Backend", "NCBI remote" if remote else "local databases")
     tsv_path, txt_path, summary_path = output_paths(out_prefix)
-    table.add_row("Outputs", f"{tsv_path}, {txt_path}, {summary_path}")
+    top1_tsv_path, top1_txt_path = top1_output_paths(out_prefix)
+    all_output_paths = (tsv_path, txt_path, summary_path, top1_tsv_path, top1_txt_path)
+    table.add_row("Outputs", "\n".join(str(p) for p in all_output_paths))
     console.print(table)
     if targets:
         _print_targets(targets)
@@ -221,7 +231,7 @@ def search(
         )
 
     _ensure_writable_prefix(out_prefix)
-    _check_no_overwrite((tsv_path, txt_path, summary_path), force)
+    _check_no_overwrite(all_output_paths, force)
 
     if remote:
         _, matrix_warning = scoring.remote_blast_args(matrix.value, ungapped=ungapped)
@@ -246,9 +256,10 @@ def search(
     )
     search_warnings: list[str] = []
     with console.status(status):
-        hits = run_search(
+        results = run_search(
             parsed.records, targets, params, db_dir=db_dir, on_warning=search_warnings.append
         )
+    hits = results.hits
     for message in search_warnings:
         warn(message)
 
@@ -275,10 +286,13 @@ def search(
             "makeblastdb": blast.tool_version("makeblastdb"),
         },
         db_metadata=db_metadata,
+        top1_hits=results.top1,
     )
     console.print(
         f"\n[green]Done.[/] {len(hits)} hit(s) written to:\n"
-        f"  {tsv_path}\n  {txt_path}\n  {summary_path}"
+        f"  {tsv_path}\n  {txt_path}\n  {summary_path}\n"
+        f"  {top1_tsv_path}\n  {top1_txt_path}\n"
+        f"  [dim]({len(results.top1)} best-hit row(s) in the _top1 files, ties included)[/]"
     )
 
 
