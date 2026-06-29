@@ -43,8 +43,10 @@ frankensearch setup --taxids 9606            # human (UniProt reference proteome
 frankensearch search myproteins.fasta --taxids 9606 -n 10
 
 # 3. Read the results
-#    myproteins.txt  -> human-readable, with alignments
-#    myproteins.tsv  -> for downstream analysis
+#    myproteins.txt             -> human-readable hit table
+#    myproteins.tsv             -> for downstream analysis
+#    myproteins_alignments.txt  -> the full pairwise alignments
+#    myproteins_top1.txt/.tsv   -> just the best hit per query/species
 ```
 
 There is an example input at `examples/franken_demo.fasta`.
@@ -80,6 +82,7 @@ drowns out another.
 | `--rank-by {identity-alignment,identity-query,alignment-length}` | How to **rank** hits within each (query, species) group: identity ÷ alignment length (default), identity ÷ query length, or longest alignment first. Both ratios and the alignment length are always reported. |
 | `--filter-by VALUE` | Threshold on the `--rank-by` metric. Writes two extra files keeping only hits at or above it, and lists every query/species with **no** passing hit. A fraction `0–1` for the identity modes, or a residue count for `alignment-length`. See [Output](#output). |
 | `--matrix {identity,pam30,blosum45,blosum62}` | Scoring matrix; `identity` (built-in pure-identity) is the default. |
+| `--no-alignments` | Skip all pairwise alignment output (no `_alignments.txt`; `_top1`/`_filtered` `.txt` become table-only). The compact `match` column is kept. |
 | `--ungapped` | Ungapped alignments only. |
 | `--remote` | Search NCBI remotely instead of using local databases (see below). |
 | `-o, --output` | Output path prefix (defaults to the input file's name). |
@@ -90,23 +93,30 @@ drowns out another.
 
 ## Output
 
-Five files are written per run, sharing the `-o/--output` prefix:
+Six files are written per run (eight with `--filter-by`), sharing the `-o/--output`
+prefix. The main `.txt`/`.tsv` are kept **compact** (one row per hit) so they stay
+manageable for large, many-query runs; the bulky pairwise alignments go to their own
+file.
 
-- **`.txt`** — human-readable, in two sections: (1) a table of every hit (query,
-  species, target, **both** identity ratios, alignment length, bit score, E-value,
-  query/subject start–end coordinates, and a final **match** column), then (2) the
-  BLAST-style pairwise alignments grouped by query then species. The match column /
-  middle "match" line shows the query residue where the two sequences are identical
-  and a dot (`.`) where they differ (e.g. `MKL.EV`).
-- **`.tsv`** — one row per hit for downstream processing, with columns including the
-  query ID, queried taxid + species, target accession + name, **both** identity
-  ratios (over alignment length and over query length), bit score, E-value,
-  alignment coordinates, and the alignment itself (as a single field with newlines
-  escaped as `\n`).
-- **`_top1.txt` / `_top1.tsv`** — the same two views filtered to just the **single
-  best hit per (query, species)**. More than one row appears only on a genuine tie
-  (hits the ranking cannot separate at all). This is independent of `-n`, so a tie
-  is never dropped.
+- **`.txt`** — human-readable: a fixed-width table of every hit (query, species,
+  target, **both** identity ratios, alignment length, bit score, E-value,
+  query/subject start–end coordinates, and a final **match** column). The match
+  column shows the query residue where the two sequences are identical and a dot
+  (`.`) where they differ (e.g. `MKL.EV`). It points to the `_alignments.txt` file
+  for the full alignments.
+- **`.tsv`** — one row per hit for downstream processing: query ID, queried taxid +
+  species, target accession + name, **both** identity ratios (over alignment length
+  and over query length), bit score, E-value, alignment coordinates, and a compact
+  **`match`** column (same dotted string as the `.txt`).
+- **`_alignments.txt`** — the BLAST-style pairwise alignments for every hit, grouped
+  by query then species (kept out of the main `.txt` so it stays small). Ignore or
+  delete it if you don't need the alignments, or pass `--no-alignments` to skip all
+  alignment output entirely (this file is not written, and `_top1`/`_filtered` `.txt`
+  become table-only).
+- **`_top1.txt` / `_top1.tsv`** — the same views filtered to just the **single best
+  hit per (query, species)**, with the alignments kept inline (this view is small).
+  More than one row appears only on a genuine tie (hits the ranking cannot separate
+  at all). Independent of `-n`, so a tie is never dropped.
 - **`_filtered_by_<x>.txt` / `_filtered_by_<x>.tsv`** — *only when `--filter-by <x>`
   is given.* Keeps just the hits whose `--rank-by` metric is ≥ `<x>`, and — the key
   point — **explicitly lists every query/species that has no hit above the

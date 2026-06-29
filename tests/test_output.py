@@ -45,18 +45,29 @@ def test_write_tsv_header_and_row(tmp_path):
     assert record["query_id"] == "frank1"
     assert record["target_accession"] == "P62987"
     assert record["identity_ratio_alignment"] == "1.0000"
-    # alignment is a single field with newlines escaped
-    assert "\n" not in record["alignment"]
-    assert "\\n" in record["alignment"]
+    # the .tsv carries the compact match line, not the full alignment
+    assert "alignment" not in record
+    assert record["match"] == "MQIFVKT"  # all 7 residues identical
 
 
-def test_tsv_alignment_round_trips(tmp_path):
+def test_write_alignments_txt_has_pairwise(tmp_path):
     hit = _hit()
-    path = tmp_path / "out.tsv"
-    output.write_tsv([hit], path)
-    record = dict(zip(*list(csv.reader(path.open(), delimiter="\t")), strict=True))
-    restored = record["alignment"].replace("\\n", "\n")
-    assert restored == render_alignment(hit.qseq, hit.sseq, hit.qstart, hit.sstart)
+    path = tmp_path / "out_alignments.txt"
+    output.write_alignments_txt(
+        [hit],
+        path,
+        queries=[QUERY],
+        taxa=[TAXON],
+        params=SearchParams(),
+        input_path=tmp_path / "in.fasta",
+    )
+    text = path.read_text()
+    assert "ALIGNMENTS" in text
+    assert "Query" in text and "Sbjct" in text
+    # the rendered alignment appears, indented as _hit_block writes it
+    rendered = render_alignment(hit.qseq, hit.sseq, hit.qstart, hit.sstart)
+    expected = "\n".join("      " + line for line in rendered.splitlines())
+    assert expected in text
 
 
 def test_write_txt_groups_and_includes_alignment(tmp_path):
@@ -197,10 +208,10 @@ def test_write_txt_remote_shows_backend_and_fallback(tmp_path):
     assert "non-redundant" in text
 
 
-def test_write_outputs_writes_five_files(tmp_path):
+def test_write_outputs_writes_six_files(tmp_path):
     input_file = tmp_path / "in.fasta"
     input_file.write_text(">frank1\nMQIFVKTLTGKTITLEVEPSDT\n")
-    tsv_path, txt_path, summary_path, top1_tsv, top1_txt = output.write_outputs(
+    tsv_path, txt_path, aln_path, summary_path, top1_tsv, top1_txt = output.write_outputs(
         [_hit()],
         tmp_path / "results",
         queries=[QUERY],
@@ -215,12 +226,20 @@ def test_write_outputs_writes_five_files(tmp_path):
     )
     assert tsv_path == tmp_path / "results.tsv" and tsv_path.exists()
     assert txt_path == tmp_path / "results.txt" and txt_path.exists()
+    assert aln_path == tmp_path / "results_alignments.txt" and aln_path.exists()
     assert summary_path == tmp_path / "results.summary.md" and summary_path.exists()
     assert top1_tsv == tmp_path / "results_top1.tsv" and top1_tsv.exists()
     assert top1_txt == tmp_path / "results_top1.txt" and top1_txt.exists()
-    # The _top1.txt identifies itself and uses the best-hit selection wording.
+    # The main .txt is table-only; the alignments live in the companion file.
+    main_text = txt_path.read_text()
+    assert "Sbjct" not in main_text
+    assert "_alignments.txt" in main_text
+    assert "Sbjct" in aln_path.read_text()
+    # The _top1.txt identifies itself, keeps its alignments inline, and uses the
+    # best-hit selection wording.
     top1_text = top1_txt.read_text()
     assert "best hit per query/species" in top1_text
+    assert "Sbjct" in top1_text
     assert "Top hits per (query, species):" not in top1_text
 
 
@@ -299,9 +318,35 @@ def test_write_outputs_with_filter_writes_seven_files(tmp_path):
         db_metadata={},
         top1_hits=[_hit()],
     )
-    assert len(paths) == 7
+    assert len(paths) == 8
     assert (tmp_path / "results_filtered_by_0.5.tsv").exists()
     assert (tmp_path / "results_filtered_by_0.5.txt").exists()
+
+
+def test_write_outputs_no_alignments(tmp_path):
+    input_file = tmp_path / "in.fasta"
+    input_file.write_text(">frank1\nMQIFVKTLTGKTITLEVEPSDT\n")
+    paths = output.write_outputs(
+        [_hit()],
+        tmp_path / "results",
+        queries=[QUERY],
+        taxa=[TAXON],
+        params=SearchParams(include_alignments=False),
+        input_path=input_file,
+        command="frankensearch search in.fasta --taxids 9606 --no-alignments",
+        frankensearch_version="0.4.0",
+        blast_versions=BLAST_VERSIONS,
+        db_metadata={},
+        top1_hits=[_hit()],
+    )
+    assert len(paths) == 5  # no _alignments.txt
+    assert not (tmp_path / "results_alignments.txt").exists()
+    # main .txt has no alignments and no pointer; _top1.txt is table-only too
+    main_text = (tmp_path / "results.txt").read_text()
+    assert "Sbjct" not in main_text and "_alignments.txt" not in main_text
+    assert "Sbjct" not in (tmp_path / "results_top1.txt").read_text()
+    # the compact match column survives in the .tsv
+    assert "match" in (tmp_path / "results.tsv").read_text().splitlines()[0]
 
 
 def test_write_summary_contains_methods_info(tmp_path):

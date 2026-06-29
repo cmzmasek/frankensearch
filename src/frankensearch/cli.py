@@ -17,6 +17,7 @@ from .errors import FrankensearchError, UserError
 from .inputs import Query
 from .output import (
     HIT_COLUMNS,
+    alignments_output_path,
     cell_text,
     filtered_output_paths,
     hit_column_header,
@@ -145,6 +146,12 @@ def search(
         "--matrix",
         help="Scoring matrix. 'identity' is BLAST's built-in pure-identity matrix.",
     ),
+    no_alignments: bool = typer.Option(
+        False,
+        "--no-alignments",
+        help="Skip all pairwise alignment output: no _alignments.txt, and the "
+        "_top1/_filtered .txt become table-only. The compact match column is kept.",
+    ),
     ungapped: bool = typer.Option(False, "--ungapped", help="Only ungapped alignments."),
     seg: bool = typer.Option(
         False, "--seg/--no-seg", help="Low-complexity (SEG) filtering (off by default)."
@@ -227,6 +234,8 @@ def search(
     table.add_row("Rank by", rank_by.value)
     if filter_by is not None:
         table.add_row("Filter", f"keep {rank_by.value} >= {filter_by:g}")
+    if no_alignments:
+        table.add_row("Alignments", "off (--no-alignments)")
     table.add_row("Matrix", matrix_desc)
     table.add_row("Gaps", scoring.gap_description(matrix.value, ungapped=ungapped))
     table.add_row("SEG filter", "on" if seg else "off")
@@ -235,8 +244,12 @@ def search(
     table.add_row("Max target seqs", str(max_target_seqs))
     table.add_row("Backend", "NCBI remote" if remote else "local databases")
     tsv_path, txt_path, summary_path = output_paths(out_prefix)
+    alignments_path = alignments_output_path(out_prefix)
     top1_tsv_path, top1_txt_path = top1_output_paths(out_prefix)
-    all_output_paths = [tsv_path, txt_path, summary_path, top1_tsv_path, top1_txt_path]
+    all_output_paths = [tsv_path, txt_path]
+    if not no_alignments:
+        all_output_paths.append(alignments_path)
+    all_output_paths += [summary_path, top1_tsv_path, top1_txt_path]
     if filter_by is not None:
         all_output_paths += list(filtered_output_paths(out_prefix, filter_by))
     all_output_paths = tuple(all_output_paths)
@@ -275,6 +288,7 @@ def search(
         remote=remote,
         seg=seg,
         filter_by=filter_by,
+        include_alignments=not no_alignments,
     )
     status = (
         "Searching NCBI remotely (this can take a while)…"

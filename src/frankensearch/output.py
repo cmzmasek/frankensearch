@@ -1,10 +1,10 @@
 """Write search results to a machine-readable .tsv and a human-readable .txt.
 
-The .txt has two sections: a fixed-width table of every hit (one row per hit,
-mirroring the console view plus query/subject coordinates) followed by the
-multi-line BLAST-style pairwise alignments grouped by query then species. Both
-files carry the alignment; the .tsv encodes it as a single field (newlines
-escaped as ``\\n``).
+The main .tsv and .txt are kept compact (one row per hit; the .tsv carries a short
+``match`` column, the .txt a fixed-width table) so they stay manageable for large,
+many-query runs. The bulky multi-line BLAST-style pairwise alignments are written
+to a separate ``_alignments.txt``. The small curated views (``_top1``, ``_filtered``)
+keep their alignments inline.
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ TSV_COLUMNS = [
     "q_end",
     "s_start",
     "s_end",
-    "alignment",
+    "match",
 ]
 
 
@@ -141,6 +141,11 @@ def top1_output_paths(out_prefix: Path) -> tuple[Path, Path]:
     )
 
 
+def alignments_output_path(out_prefix: Path) -> Path:
+    """The pairwise-alignments file: _alignments.txt (kept out of the main .txt)."""
+    return out_prefix.parent / f"{out_prefix.name}_alignments.txt"
+
+
 def filtered_output_paths(out_prefix: Path, filter_by: float) -> tuple[Path, Path]:
     """The two threshold-filtered files: (_filtered_by_<x>.tsv, _filtered_by_<x>.txt).
 
@@ -171,16 +176,21 @@ def write_outputs(
 ) -> tuple[Path, ...]:
     """Write the output files; return every path written.
 
-    Always: .tsv, .txt, .summary.md, plus two best-hit-only views built from
-    ``top1_hits`` (the single best hit per query/species, all ties included):
+    Always: the compact main .tsv and .txt (table only), the bulky pairwise
+    alignments as _alignments.txt, .summary.md, and two best-hit-only views built
+    from ``top1_hits`` (the single best hit per query/species, all ties included):
     _top1.tsv and _top1.txt. When ``params.filter_by`` is set, also writes
     _filtered_by_<x>.tsv and _filtered_by_<x>.txt (passing hits only, with every
     query/species that has none reported as "no hit above threshold").
     """
+    include_alignments = params.include_alignments
     tsv_path, txt_path, summary_path = output_paths(out_prefix)
+    alignments_path = alignments_output_path(out_prefix)
     top1_tsv_path, top1_txt_path = top1_output_paths(out_prefix)
     tsv_path.parent.mkdir(parents=True, exist_ok=True)
     write_tsv(hits, tsv_path)
+    # The main .txt is always table-only; it points to _alignments.txt unless that
+    # file is skipped via --no-alignments.
     write_txt(
         hits,
         txt_path,
@@ -189,7 +199,21 @@ def write_outputs(
         params=params,
         input_path=input_path,
         db_metadata=db_metadata,
+        include_alignments=False,
+        alignments_note=include_alignments,
     )
+    written = [tsv_path, txt_path]
+    if include_alignments:
+        write_alignments_txt(
+            hits,
+            alignments_path,
+            queries=queries,
+            taxa=taxa,
+            params=params,
+            input_path=input_path,
+            db_metadata=db_metadata,
+        )
+        written.append(alignments_path)
     write_summary(
         summary_path,
         hits=hits,
@@ -212,8 +236,9 @@ def write_outputs(
         input_path=input_path,
         db_metadata=db_metadata,
         top1=True,
+        include_alignments=include_alignments,  # inline unless --no-alignments
     )
-    written = [tsv_path, txt_path, summary_path, top1_tsv_path, top1_txt_path]
+    written += [summary_path, top1_tsv_path, top1_txt_path]
 
     if params.filter_by is not None:
         filt_tsv_path, filt_txt_path = filtered_output_paths(out_prefix, params.filter_by)
@@ -232,6 +257,7 @@ def write_outputs(
             passing_by_group=passing_by_group,
             no_hit=no_hit,
             db_metadata=db_metadata,
+            include_alignments=include_alignments,
         )
         written += [filt_tsv_path, filt_txt_path]
 
@@ -258,7 +284,7 @@ def _hit_tsv_row(hit: Hit) -> list:
         hit.qend,
         hit.sstart,
         hit.send,
-        hit.alignment_text.replace("\n", "\\n"),
+        hit.match_line,
     ]
 
 
@@ -336,6 +362,8 @@ def write_txt(
     input_path: Path,
     db_metadata: dict[int, DbMetadata] | None = None,
     top1: bool = False,
+    include_alignments: bool = True,
+    alignments_note: bool = False,
 ) -> None:
     by_group: dict[tuple[str, int], list[Hit]] = {}
     for hit in hits:
@@ -353,7 +381,43 @@ def write_txt(
     lines += ["", "=" * 80, "HITS", "=" * 80, ""]
     lines += _hit_table(hits, params.rank_by) if hits else ["(no hits)"]
 
-    # Section 2: the BLAST-style pairwise alignments, grouped by query then species.
+    # Section 2: the BLAST-style pairwise alignments. The bulky main file omits
+    # them; it points to the companion _alignments.txt unless that file is also
+    # being skipped (--no-alignments).
+    if include_alignments:
+        lines += ["", "=" * 80, "ALIGNMENTS", "=" * 80]
+        lines += _alignment_blocks(queries, taxa, by_group, "(no hits)")
+    elif alignments_note:
+        lines.append("")
+        lines.append("Pairwise alignments for every hit are in the companion _alignments.txt file.")
+
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_alignments_txt(
+    hits: list[Hit],
+    path: Path,
+    *,
+    queries: list[Query],
+    taxa: list[Taxon],
+    params: SearchParams,
+    input_path: Path,
+    db_metadata: dict[int, DbMetadata] | None = None,
+) -> None:
+    """The pairwise alignments for every hit, in their own file so the main .txt
+    stays compact for large, many-query runs."""
+    by_group: dict[tuple[str, int], list[Hit]] = {}
+    for hit in hits:
+        by_group.setdefault((hit.query_id, hit.taxid), []).append(hit)
+
+    lines = _txt_header(
+        params,
+        input_path,
+        taxa,
+        db_metadata,
+        title="FRANKENSEARCH results — pairwise alignments",
+        info_lines=[f"Top hits per (query, species): {params.num_hits}"],
+    )
     lines += ["", "=" * 80, "ALIGNMENTS", "=" * 80]
     lines += _alignment_blocks(queries, taxa, by_group, "(no hits)")
 
@@ -445,6 +509,7 @@ def write_filtered_txt(
     passing_by_group: dict[tuple[str, int], list[Hit]],
     no_hit: list[tuple[Query, Taxon]],
     db_metadata: dict[int, DbMetadata] | None = None,
+    include_alignments: bool = True,
 ) -> None:
     """The .txt of hits that passed the filter, with an explicit section listing
     every (query, species) in ``no_hit`` -- those with no hit above the threshold."""
@@ -478,9 +543,10 @@ def write_filtered_txt(
     else:
         lines.append("(every query has a hit above the threshold in every species)")
 
-    # Section 3: pairwise alignments for the passing hits.
-    lines += ["", "=" * 80, "ALIGNMENTS", "=" * 80]
-    lines += _alignment_blocks(queries, taxa, passing_by_group, "(no hit above threshold)")
+    # Section 3: pairwise alignments for the passing hits (skipped with --no-alignments).
+    if include_alignments:
+        lines += ["", "=" * 80, "ALIGNMENTS", "=" * 80]
+        lines += _alignment_blocks(queries, taxa, passing_by_group, "(no hit above threshold)")
 
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 

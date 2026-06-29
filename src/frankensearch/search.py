@@ -51,6 +51,10 @@ class SearchParams:
     # Optional threshold on the active rank_by metric for the _filtered output
     # files. Identity modes: a fraction 0-1; alignment-length: a residue count.
     filter_by: float | None = None
+    # When False (--no-alignments), no pairwise alignments are written at all:
+    # no _alignments.txt, and the _top1/_filtered .txt become table-only. The
+    # compact match column/line is unaffected.
+    include_alignments: bool = True
 
 
 @dataclass
