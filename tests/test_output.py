@@ -187,7 +187,7 @@ def test_write_summary_contains_methods_info(tmp_path):
         scientific_name="Homo sapiens",
         rank="species",
         proteome_set="swissprot",
-        query="(organism_id:9606) AND (reviewed:true)",
+        query="(taxonomy_id:9606) AND (reviewed:true)",
         sequence_count=20442,
         built_at="2026-06-18T00:00:00+00:00",
         makeblastdb_version="makeblastdb: 2.17.0+",
@@ -212,7 +212,7 @@ def test_write_summary_contains_methods_info(tmp_path):
     assert "frankensearch search in.fasta --taxids 9606" in text
     assert "Input SHA-256" in text
     assert "swissprot" in text
-    assert "(organism_id:9606) AND (reviewed:true)" in text
+    assert "(taxonomy_id:9606) AND (reviewed:true)" in text
     assert "2026_02" in text  # UniProt release
     assert "Suggested methods text" in text
     assert "BLAST+" in text  # a reference is present

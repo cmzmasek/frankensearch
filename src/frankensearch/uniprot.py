@@ -47,11 +47,17 @@ def make_client(timeout: float = 300.0) -> httpx.Client:
 
 
 def build_query(taxid: int, proteome_set: str, *, client: httpx.Client) -> str:
-    """Return the UniProtKB query string for a taxid + set."""
+    """Return the UniProtKB query string for a taxid + set.
+
+    We match on ``taxonomy_id`` (the taxon *and all its descendants*), not
+    ``organism_id`` (an exact single-taxid match). Many species -- viruses and
+    bacteria especially -- have their UniProtKB entries assigned to strain/isolate
+    child taxids, so an exact match on the species taxid returns nothing.
+    """
     if proteome_set == "swissprot":
-        return f"(organism_id:{taxid}) AND (reviewed:true)"
+        return f"(taxonomy_id:{taxid}) AND (reviewed:true)"
     if proteome_set == "all":
-        return f"(organism_id:{taxid})"
+        return f"(taxonomy_id:{taxid})"
     if proteome_set == "reference":
         return f"(proteome:{find_reference_proteome(taxid, client=client)})"
     raise UserError(
@@ -65,7 +71,7 @@ def find_reference_proteome(taxid: int, *, client: httpx.Client) -> str:
     try:
         response = client.get(
             PROTEOMES_SEARCH,
-            params={"query": f"organism_id:{taxid}", "format": "json", "size": "25"},
+            params={"query": f"taxonomy_id:{taxid}", "format": "json", "size": "25"},
         )
     except httpx.RequestError as exc:
         raise UserError(
@@ -78,12 +84,17 @@ def find_reference_proteome(taxid: int, *, client: httpx.Client) -> str:
             f"UniProt proteome lookup failed (status {response.status_code}) for taxid {taxid}."
         )
 
-    candidates: list[tuple[int, str]] = []
+    # ``taxonomy_id`` searches the subtree, so the results may belong to strain
+    # children of the queried species. Rank by proteome type, then prefer a
+    # proteome assigned to exactly the queried taxid, then by UPID for stability.
+    candidates: list[tuple[int, int, str]] = []
     for item in response.json().get("results", []):
         priority = _PROTEOME_TYPE_PRIORITY.get(item.get("proteomeType", ""))
         upid = item.get("id")
         if priority is not None and upid:
-            candidates.append((priority, upid))
+            item_taxid = item.get("taxonomy", {}).get("taxonId")
+            exact = 0 if item_taxid == taxid else 1
+            candidates.append((priority, exact, upid))
 
     if not candidates:
         raise UserError(
@@ -91,7 +102,7 @@ def find_reference_proteome(taxid: int, *, client: httpx.Client) -> str:
             hint="Try '--proteome-set swissprot' (reviewed only) or '--proteome-set all'.",
         )
     candidates.sort()
-    return candidates[0][1]
+    return candidates[0][2]
 
 
 def download_fasta(query: str, dest: Path, *, client: httpx.Client) -> DownloadResult:

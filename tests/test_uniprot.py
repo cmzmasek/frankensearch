@@ -13,11 +13,11 @@ def _client(handler):
 
 def test_build_query_swissprot():
     query = uniprot.build_query(9606, "swissprot", client=None)
-    assert query == "(organism_id:9606) AND (reviewed:true)"
+    assert query == "(taxonomy_id:9606) AND (reviewed:true)"
 
 
 def test_build_query_all():
-    assert uniprot.build_query(10090, "all", client=None) == "(organism_id:10090)"
+    assert uniprot.build_query(10090, "all", client=None) == "(taxonomy_id:10090)"
 
 
 def test_build_query_unknown_set():
@@ -38,6 +38,44 @@ def test_find_reference_proteome_prefers_reference():
         )
 
     assert uniprot.find_reference_proteome(9606, client=_client(handler)) == "UP000005640"
+
+
+def test_find_reference_proteome_prefers_exact_taxid_among_strains():
+    # Subtree (taxonomy_id) search returns several reference proteomes belonging
+    # to strain children; the one assigned to exactly the queried taxid wins.
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"id": "UP000000938", "proteomeType": "Reference proteome",
+                     "taxonomy": {"taxonId": 295027}},
+                    {"id": "UP000099999", "proteomeType": "Reference proteome",
+                     "taxonomy": {"taxonId": 3050295}},
+                ]
+            },
+        )
+
+    assert uniprot.find_reference_proteome(3050295, client=_client(handler)) == "UP000099999"
+
+
+def test_find_reference_proteome_falls_back_to_strain_proteome():
+    # No proteome matches the queried species taxid exactly; the best strain
+    # proteome (by type, then UPID) is still returned rather than failing.
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"id": "UP000000938", "proteomeType": "Reference proteome",
+                     "taxonomy": {"taxonId": 295027}},
+                    {"id": "UP000008992", "proteomeType": "Reference proteome",
+                     "taxonomy": {"taxonId": 10360}},
+                ]
+            },
+        )
+
+    assert uniprot.find_reference_proteome(3050295, client=_client(handler)) == "UP000000938"
 
 
 def test_find_reference_proteome_none_usable_raises():
