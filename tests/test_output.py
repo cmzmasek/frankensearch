@@ -50,6 +50,33 @@ def test_write_tsv_header_and_row(tmp_path):
     assert record["match"] == "MQIFVKT"  # all 7 residues identical
 
 
+def test_write_tsv_output_query_adds_sequence_column(tmp_path):
+    path = tmp_path / "out.tsv"
+    output.write_tsv([_hit()], path, query_seqs={"frank1": QUERY.sequence})
+    rows = list(csv.reader(path.open(), delimiter="\t"))
+    assert rows[0] == output.tsv_columns(True)
+    record = dict(zip(rows[0], rows[1], strict=True))
+    assert record["query_sequence"] == QUERY.sequence
+    # the column sits right after query_len
+    assert rows[0].index("query_sequence") == rows[0].index("query_len") + 1
+
+
+def test_write_txt_output_query_adds_query_section(tmp_path):
+    path = tmp_path / "out.txt"
+    output.write_txt(
+        [_hit()],
+        path,
+        queries=[QUERY],
+        taxa=[TAXON],
+        params=SearchParams(output_query=True),
+        input_path=tmp_path / "in.fasta",
+    )
+    text = path.read_text()
+    assert "QUERY SEQUENCES" in text
+    assert f">{QUERY.id}  (length {len(QUERY.sequence)})" in text
+    assert QUERY.sequence in text
+
+
 def test_write_alignments_txt_has_pairwise(tmp_path):
     hit = _hit()
     path = tmp_path / "out_alignments.txt"

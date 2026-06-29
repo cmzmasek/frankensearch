@@ -55,6 +55,10 @@ class SearchParams:
     # no _alignments.txt, and the _top1/_filtered .txt become table-only. The
     # compact match column/line is unaffected.
     include_alignments: bool = True
+    # When True (--output-query), the full query sequence is added to the outputs:
+    # a query_sequence column in the .tsv files and a QUERY SEQUENCES section in
+    # the .txt files (the query name is always reported regardless).
+    output_query: bool = False
 
 
 @dataclass

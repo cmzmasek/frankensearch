@@ -83,6 +83,7 @@ drowns out another.
 | `--filter-by VALUE` | Threshold on the `--rank-by` metric. Writes two extra files keeping only hits at or above it, and lists every query/species with **no** passing hit. A fraction `0–1` for the identity modes, or a residue count for `alignment-length`. See [Output](#output). |
 | `--matrix {identity,pam30,blosum45,blosum62}` | Scoring matrix; `identity` (built-in pure-identity) is the default. |
 | `--no-alignments` | Skip all pairwise alignment output (no `_alignments.txt`; `_top1`/`_filtered` `.txt` become table-only). The compact `match` column is kept. |
+| `--output-query` | Also report the full query sequence (in addition to its name): a `query_sequence` column in the `.tsv` files and a `QUERY SEQUENCES` section in the `.txt` files. |
 | `--ungapped` | Ungapped alignments only. |
 | `--remote` | Search NCBI remotely instead of using local databases (see below). |
 | `-o, --output` | Output path prefix (defaults to the input file's name). |
@@ -103,11 +104,13 @@ file.
   query/subject start–end coordinates, and a final **match** column). The match
   column shows the query residue where the two sequences are identical and a dot
   (`.`) where they differ (e.g. `MKL.EV`). It points to the `_alignments.txt` file
-  for the full alignments.
+  for the full alignments. With `--output-query` it also has a `QUERY SEQUENCES`
+  section.
 - **`.tsv`** — one row per hit for downstream processing: query ID, queried taxid +
   species, target accession + name, **both** identity ratios (over alignment length
   and over query length), bit score, E-value, alignment coordinates, and a compact
-  **`match`** column (same dotted string as the `.txt`).
+  **`match`** column (same dotted string as the `.txt`). With `--output-query` a
+  `query_sequence` column is added.
 - **`_alignments.txt`** — the BLAST-style pairwise alignments for every hit, grouped
   by query then species (kept out of the main `.txt` so it stays small). Ignore or
   delete it if you don't need the alignments, or pass `--no-alignments` to skip all

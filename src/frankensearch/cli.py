@@ -152,6 +152,13 @@ def search(
         help="Skip all pairwise alignment output: no _alignments.txt, and the "
         "_top1/_filtered .txt become table-only. The compact match column is kept.",
     ),
+    output_query: bool = typer.Option(
+        False,
+        "--output-query",
+        help="Also report the full query sequence (in addition to its name): a "
+        "query_sequence column in the .tsv files and a QUERY SEQUENCES section in "
+        "the .txt files.",
+    ),
     ungapped: bool = typer.Option(False, "--ungapped", help="Only ungapped alignments."),
     seg: bool = typer.Option(
         False, "--seg/--no-seg", help="Low-complexity (SEG) filtering (off by default)."
@@ -236,6 +243,8 @@ def search(
         table.add_row("Filter", f"keep {rank_by.value} >= {filter_by:g}")
     if no_alignments:
         table.add_row("Alignments", "off (--no-alignments)")
+    if output_query:
+        table.add_row("Query sequence", "included in outputs")
     table.add_row("Matrix", matrix_desc)
     table.add_row("Gaps", scoring.gap_description(matrix.value, ungapped=ungapped))
     table.add_row("SEG filter", "on" if seg else "off")
@@ -289,6 +298,7 @@ def search(
         seg=seg,
         filter_by=filter_by,
         include_alignments=not no_alignments,
+        output_query=output_query,
     )
     status = (
         "Searching NCBI remotely (this can take a while)…"

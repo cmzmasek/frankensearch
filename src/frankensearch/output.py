@@ -184,11 +184,12 @@ def write_outputs(
     query/species that has none reported as "no hit above threshold").
     """
     include_alignments = params.include_alignments
+    query_seqs = {q.id: q.sequence for q in queries} if params.output_query else None
     tsv_path, txt_path, summary_path = output_paths(out_prefix)
     alignments_path = alignments_output_path(out_prefix)
     top1_tsv_path, top1_txt_path = top1_output_paths(out_prefix)
     tsv_path.parent.mkdir(parents=True, exist_ok=True)
-    write_tsv(hits, tsv_path)
+    write_tsv(hits, tsv_path, query_seqs=query_seqs)
     # The main .txt is always table-only; it points to _alignments.txt unless that
     # file is skipped via --no-alignments.
     write_txt(
@@ -226,7 +227,7 @@ def write_outputs(
         blast_versions=blast_versions,
         db_metadata=db_metadata,
     )
-    write_tsv(top1_hits, top1_tsv_path)
+    write_tsv(top1_hits, top1_tsv_path, query_seqs=query_seqs)
     write_txt(
         top1_hits,
         top1_txt_path,
@@ -246,7 +247,11 @@ def write_outputs(
             hits, queries, taxa, params.rank_by, params.filter_by
         )
         write_filtered_tsv(
-            filt_tsv_path, queries=queries, taxa=taxa, passing_by_group=passing_by_group
+            filt_tsv_path,
+            queries=queries,
+            taxa=taxa,
+            passing_by_group=passing_by_group,
+            query_seqs=query_seqs,
         )
         write_filtered_txt(
             filt_txt_path,
@@ -264,9 +269,20 @@ def write_outputs(
     return tuple(written)
 
 
-def _hit_tsv_row(hit: Hit) -> list:
-    """One .tsv data row for a hit, in TSV_COLUMNS order."""
-    return [
+def tsv_columns(output_query: bool) -> list[str]:
+    """The .tsv header. With ``output_query`` a ``query_sequence`` column is
+    inserted right after ``query_len``."""
+    if not output_query:
+        return TSV_COLUMNS
+    cols = list(TSV_COLUMNS)
+    cols.insert(2, "query_sequence")
+    return cols
+
+
+def _hit_tsv_row(hit: Hit, query_sequence: str | None = None) -> list:
+    """One .tsv data row for a hit, in ``tsv_columns()`` order. When
+    ``query_sequence`` is given it is inserted right after ``query_len``."""
+    row = [
         hit.query_id,
         hit.query_len,
         hit.taxid,
@@ -286,14 +302,19 @@ def _hit_tsv_row(hit: Hit) -> list:
         hit.send,
         hit.match_line,
     ]
+    if query_sequence is not None:
+        row.insert(2, query_sequence)
+    return row
 
 
-def write_tsv(hits: list[Hit], path: Path) -> None:
+def write_tsv(hits: list[Hit], path: Path, *, query_seqs: dict[str, str] | None = None) -> None:
+    output_query = query_seqs is not None
     with open(path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
-        writer.writerow(TSV_COLUMNS)
+        writer.writerow(tsv_columns(output_query))
         for hit in hits:
-            writer.writerow(_hit_tsv_row(hit))
+            seq = query_seqs.get(hit.query_id, "") if output_query else None
+            writer.writerow(_hit_tsv_row(hit, seq))
 
 
 def _database_lines(taxa: list[Taxon], db_metadata: dict[int, DbMetadata]) -> list[str]:
@@ -326,9 +347,11 @@ def _txt_header(
     *,
     title: str,
     info_lines: list[str],
+    queries: list[Query] | None = None,
 ) -> list[str]:
     """The shared .txt header: title, run metadata, queried databases, scoring and
-    ranking, the caller's ``info_lines``, and the standard notes."""
+    ranking, the caller's ``info_lines``, and the standard notes. With
+    ``params.output_query`` a FASTA-style QUERY SEQUENCES section is appended."""
     backend, matrix_label, gaps, ranked_by = _scoring_summary(params)
     lines: list[str] = [
         title,
@@ -349,6 +372,11 @@ def _txt_header(
             "Note:       Remote nr is non-redundant; a hit's listed organism may "
             "differ from the queried taxid."
         )
+    if params.output_query and queries:
+        lines += ["", "=" * 80, "QUERY SEQUENCES", "=" * 80, ""]
+        for query in queries:
+            lines.append(f">{query.id}  (length {len(query.sequence)})")
+            lines.append(query.sequence)
     return lines
 
 
@@ -375,7 +403,9 @@ def write_txt(
     else:
         title = "FRANKENSEARCH results"
         info_lines = [f"Top hits per (query, species): {params.num_hits}"]
-    lines = _txt_header(params, input_path, taxa, db_metadata, title=title, info_lines=info_lines)
+    lines = _txt_header(
+        params, input_path, taxa, db_metadata, title=title, info_lines=info_lines, queries=queries
+    )
 
     # Section 1: one table of every hit (grouped by query then species in row order).
     lines += ["", "=" * 80, "HITS", "=" * 80, ""]
@@ -417,6 +447,7 @@ def write_alignments_txt(
         db_metadata,
         title="FRANKENSEARCH results — pairwise alignments",
         info_lines=[f"Top hits per (query, species): {params.num_hits}"],
+        queries=queries,
     )
     lines += ["", "=" * 80, "ALIGNMENTS", "=" * 80]
     lines += _alignment_blocks(queries, taxa, by_group, "(no hits)")
@@ -475,28 +506,29 @@ def write_filtered_tsv(
     queries: list[Query],
     taxa: list[Taxon],
     passing_by_group: dict[tuple[str, int], list[Hit]],
+    query_seqs: dict[str, str] | None = None,
 ) -> None:
     """The .tsv of hits that passed the filter (``passing_by_group``), with a
     leading ``status`` column. Each (query, species) with no passing hit gets one
     row flagged ``no_hit_above_threshold`` (hit fields blank)."""
+    output_query = query_seqs is not None
     blanks = [""] * (len(TSV_COLUMNS) - 4)  # query_id/len/taxid/species are filled
     with open(path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
-        writer.writerow(["status", *TSV_COLUMNS])
+        writer.writerow(["status", *tsv_columns(output_query)])
         for query in queries:
             for taxon in taxa:
                 passing = passing_by_group.get((query.id, taxon.taxid), [])
                 if passing:
                     for hit in passing:
-                        writer.writerow(["hit", *_hit_tsv_row(hit)])
+                        seq = query_seqs.get(hit.query_id, "") if output_query else None
+                        writer.writerow(["hit", *_hit_tsv_row(hit, seq)])
                 else:
-                    writer.writerow(
-                        [
-                            "no_hit_above_threshold",
-                            query.id, len(query.sequence), taxon.taxid, taxon.name,
-                            *blanks,
-                        ]
-                    )
+                    prefix = [query.id, len(query.sequence)]
+                    if output_query:
+                        prefix.append(query.sequence)
+                    prefix += [taxon.taxid, taxon.name]
+                    writer.writerow(["no_hit_above_threshold", *prefix, *blanks])
 
 
 def write_filtered_txt(
@@ -529,6 +561,7 @@ def write_filtered_txt(
         db_metadata,
         title="FRANKENSEARCH results — filtered",
         info_lines=info_lines,
+        queries=queries,
     )
 
     # Section 1: the hits that pass the threshold.
