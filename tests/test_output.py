@@ -143,6 +143,44 @@ def test_write_txt_notes_taxon_with_no_hits(tmp_path):
     assert "(no hits)" in path.read_text()
 
 
+def test_write_txt_lists_queried_databases(tmp_path):
+    path = tmp_path / "out.txt"
+    meta = DbMetadata(
+        taxid=9606,
+        scientific_name="Homo sapiens",
+        rank="species",
+        proteome_set="reference",
+        query="(proteome:UP000005640)",
+        sequence_count=147519,
+        built_at="2026-06-18T00:00:00+00:00",
+    )
+    output.write_txt(
+        [_hit()],
+        path,
+        queries=[QUERY],
+        taxa=[TAXON],
+        params=SearchParams(),
+        input_path=tmp_path / "in.fasta",
+        db_metadata={9606: meta},
+    )
+    text = path.read_text()
+    assert "Databases:  Homo sapiens (taxid 9606, 147,519 sequences, reference)" in text
+
+
+def test_write_txt_remote_omits_database_list(tmp_path):
+    path = tmp_path / "out.txt"
+    output.write_txt(
+        [],
+        path,
+        queries=[QUERY],
+        taxa=[TAXON],
+        params=SearchParams(remote=True),
+        input_path=tmp_path / "in.fasta",
+        db_metadata={},
+    )
+    assert "Databases:" not in path.read_text()
+
+
 def test_write_txt_remote_shows_backend_and_fallback(tmp_path):
     path = tmp_path / "out.txt"
     output.write_txt(

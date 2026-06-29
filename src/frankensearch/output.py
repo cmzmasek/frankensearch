@@ -149,7 +149,15 @@ def write_outputs(
     tsv_path, txt_path, summary_path = output_paths(out_prefix)
     tsv_path.parent.mkdir(parents=True, exist_ok=True)
     write_tsv(hits, tsv_path)
-    write_txt(hits, txt_path, queries=queries, taxa=taxa, params=params, input_path=input_path)
+    write_txt(
+        hits,
+        txt_path,
+        queries=queries,
+        taxa=taxa,
+        params=params,
+        input_path=input_path,
+        db_metadata=db_metadata,
+    )
     write_summary(
         summary_path,
         hits=hits,
@@ -194,6 +202,28 @@ def write_tsv(hits: list[Hit], path: Path) -> None:
             )
 
 
+def _database_lines(taxa: list[Taxon], db_metadata: dict[int, DbMetadata]) -> list[str]:
+    """One header line per queried local database: name, taxid, count, set.
+
+    Continuation lines are indented to align under the first entry, matching the
+    12-column label padding of the surrounding header block.
+    """
+    entries: list[str] = []
+    for taxon in taxa:
+        meta = db_metadata.get(taxon.taxid)
+        if meta is not None:
+            entries.append(
+                f"{meta.scientific_name} (taxid {meta.taxid}, "
+                f"{meta.sequence_count:,} sequences, {meta.proteome_set})"
+            )
+        else:
+            entries.append(f"{taxon.name} (taxid {taxon.taxid})")
+    if not entries:
+        return []
+    indent = " " * 12
+    return [f"Databases:  {entries[0]}"] + [f"{indent}{entry}" for entry in entries[1:]]
+
+
 def write_txt(
     hits: list[Hit],
     path: Path,
@@ -202,6 +232,7 @@ def write_txt(
     taxa: list[Taxon],
     params: SearchParams,
     input_path: Path,
+    db_metadata: dict[int, DbMetadata] | None = None,
 ) -> None:
     by_group: dict[tuple[str, int], list[Hit]] = {}
     for hit in hits:
@@ -213,6 +244,10 @@ def write_txt(
         f"Input:      {input_path}",
         f"Generated:  {datetime.now().strftime('%Y-%m-%d %H:%M')}",
         f"Backend:    {backend}",
+    ]
+    if not params.remote:
+        lines += _database_lines(taxa, db_metadata or {})
+    lines += [
         f"Matrix:     {matrix_label}    Gaps: {gaps}",
         f"Ranked by:  {ranked_by}",
         f"Top hits per (query, species): {params.num_hits}",
