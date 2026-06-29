@@ -18,6 +18,7 @@ from .inputs import Query
 from .output import (
     HIT_COLUMNS,
     cell_text,
+    filtered_output_paths,
     hit_column_header,
     output_paths,
     top1_output_paths,
@@ -131,6 +132,14 @@ def search(
             "alignment length are always reported regardless."
         ),
     ),
+    filter_by: float = typer.Option(
+        None,
+        "--filter-by",
+        help="Threshold on the --rank-by metric. If set, also writes "
+        "<prefix>_filtered_by_<x>.tsv/.txt with only hits at or above it; every "
+        "query/species with none is listed as 'no hit above threshold'. A fraction "
+        "0-1 for the identity modes, or a residue count for alignment-length.",
+    ),
     matrix: Matrix = typer.Option(
         Matrix.identity,
         "--matrix",
@@ -181,6 +190,18 @@ def search(
 ) -> None:
     """Search query sequences against one or more species databases."""
     taxid_list = _parse_taxids(taxids)
+    if filter_by is not None:
+        if rank_by is RankBy.alignment_length:
+            if filter_by < 0:
+                raise UserError(
+                    "--filter-by must be 0 or greater for --rank-by alignment-length.",
+                    hint="It is a residue count, e.g. --filter-by 12.",
+                )
+        elif not 0.0 <= filter_by <= 1.0:
+            raise UserError(
+                "--filter-by must be between 0 and 1 for identity ranking.",
+                hint="It is a fraction, e.g. --filter-by 0.8 for 80% identity.",
+            )
     base = output if output is not None else Path(input_file.stem)
     out_prefix = (out_dir / base.name) if out_dir is not None else base
 
@@ -204,6 +225,8 @@ def search(
     table.add_row("Taxids", ", ".join(str(t) for t in taxid_list))
     table.add_row("Top hits per query/species", str(num_hits))
     table.add_row("Rank by", rank_by.value)
+    if filter_by is not None:
+        table.add_row("Filter", f"keep {rank_by.value} >= {filter_by:g}")
     table.add_row("Matrix", matrix_desc)
     table.add_row("Gaps", scoring.gap_description(matrix.value, ungapped=ungapped))
     table.add_row("SEG filter", "on" if seg else "off")
@@ -213,7 +236,10 @@ def search(
     table.add_row("Backend", "NCBI remote" if remote else "local databases")
     tsv_path, txt_path, summary_path = output_paths(out_prefix)
     top1_tsv_path, top1_txt_path = top1_output_paths(out_prefix)
-    all_output_paths = (tsv_path, txt_path, summary_path, top1_tsv_path, top1_txt_path)
+    all_output_paths = [tsv_path, txt_path, summary_path, top1_tsv_path, top1_txt_path]
+    if filter_by is not None:
+        all_output_paths += list(filtered_output_paths(out_prefix, filter_by))
+    all_output_paths = tuple(all_output_paths)
     table.add_row("Outputs", "\n".join(str(p) for p in all_output_paths))
     console.print(table)
     if targets:
@@ -248,6 +274,7 @@ def search(
         num_hits=num_hits,
         remote=remote,
         seg=seg,
+        filter_by=filter_by,
     )
     status = (
         "Searching NCBI remotely (this can take a while)…"
@@ -288,10 +315,9 @@ def search(
         db_metadata=db_metadata,
         top1_hits=results.top1,
     )
+    files_block = "\n".join(f"  {p}" for p in all_output_paths)
     console.print(
-        f"\n[green]Done.[/] {len(hits)} hit(s) written to:\n"
-        f"  {tsv_path}\n  {txt_path}\n  {summary_path}\n"
-        f"  {top1_tsv_path}\n  {top1_txt_path}\n"
+        f"\n[green]Done.[/] {len(hits)} hit(s) written to:\n{files_block}\n"
         f"  [dim]({len(results.top1)} best-hit row(s) in the _top1 files, ties included)[/]"
     )
 

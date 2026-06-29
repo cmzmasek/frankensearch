@@ -48,6 +48,9 @@ class SearchParams:
     num_hits: int = 10
     remote: bool = False
     seg: bool = False  # low-complexity (SEG) filtering; off by default
+    # Optional threshold on the active rank_by metric for the _filtered output
+    # files. Identity modes: a fraction 0-1; alignment-length: a residue count.
+    filter_by: float | None = None
 
 
 @dataclass
@@ -115,6 +118,17 @@ class Hit:
     @property
     def alignment_text(self) -> str:
         return render_alignment(self.qseq, self.sseq, self.qstart, self.sstart)
+
+
+def rank_metric(hit: Hit, rank_by: str) -> float:
+    """The hit's value for the active ``--rank-by`` metric, in the same units that
+    ``--filter-by`` uses: a fraction (0-1) for the identity modes, or the residue
+    count for ``alignment-length``."""
+    if rank_by == "alignment-length":
+        return float(hit.align_len)
+    if rank_by == "identity-query":
+        return hit.identity_over_query
+    return hit.identity_over_alignment  # identity-alignment (default)
 
 
 def top1_of_group(sorted_hits: list[Hit], rank_by: str) -> list[Hit]:

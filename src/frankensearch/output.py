@@ -19,7 +19,7 @@ from pathlib import Path
 from . import scoring
 from .database import DbMetadata
 from .inputs import Query
-from .search import Hit, SearchParams
+from .search import Hit, SearchParams, rank_metric
 from .taxonomy import Taxon
 
 # Literature references included in the methods-grade summary.
@@ -141,6 +141,20 @@ def top1_output_paths(out_prefix: Path) -> tuple[Path, Path]:
     )
 
 
+def filtered_output_paths(out_prefix: Path, filter_by: float) -> tuple[Path, Path]:
+    """The two threshold-filtered files: (_filtered_by_<x>.tsv, _filtered_by_<x>.txt).
+
+    ``<x>`` is the threshold formatted with ``g`` (e.g. 0.8, 12), so distinct
+    thresholds get distinct filenames and don't overwrite each other.
+    """
+    base = out_prefix
+    tag = f"{filter_by:g}"
+    return (
+        base.parent / f"{base.name}_filtered_by_{tag}.tsv",
+        base.parent / f"{base.name}_filtered_by_{tag}.txt",
+    )
+
+
 def write_outputs(
     hits: list[Hit],
     out_prefix: Path,
@@ -154,12 +168,14 @@ def write_outputs(
     blast_versions: dict[str, str | None],
     db_metadata: dict[int, DbMetadata],
     top1_hits: list[Hit],
-) -> tuple[Path, Path, Path, Path, Path]:
-    """Write the five output files; return their paths.
+) -> tuple[Path, ...]:
+    """Write the output files; return every path written.
 
-    Core: .tsv, .txt, .summary.md. Plus two best-hit-only views built from
+    Always: .tsv, .txt, .summary.md, plus two best-hit-only views built from
     ``top1_hits`` (the single best hit per query/species, all ties included):
-    _top1.tsv and _top1.txt.
+    _top1.tsv and _top1.txt. When ``params.filter_by`` is set, also writes
+    _filtered_by_<x>.tsv and _filtered_by_<x>.txt (passing hits only, with every
+    query/species that has none reported as "no hit above threshold").
     """
     tsv_path, txt_path, summary_path = output_paths(out_prefix)
     top1_tsv_path, top1_txt_path = top1_output_paths(out_prefix)
@@ -197,7 +213,53 @@ def write_outputs(
         db_metadata=db_metadata,
         top1=True,
     )
-    return tsv_path, txt_path, summary_path, top1_tsv_path, top1_txt_path
+    written = [tsv_path, txt_path, summary_path, top1_tsv_path, top1_txt_path]
+
+    if params.filter_by is not None:
+        filt_tsv_path, filt_txt_path = filtered_output_paths(out_prefix, params.filter_by)
+        passing_by_group, no_hit = _passing_by_group(
+            hits, queries, taxa, params.rank_by, params.filter_by
+        )
+        write_filtered_tsv(
+            filt_tsv_path, queries=queries, taxa=taxa, passing_by_group=passing_by_group
+        )
+        write_filtered_txt(
+            filt_txt_path,
+            queries=queries,
+            taxa=taxa,
+            params=params,
+            input_path=input_path,
+            passing_by_group=passing_by_group,
+            no_hit=no_hit,
+            db_metadata=db_metadata,
+        )
+        written += [filt_tsv_path, filt_txt_path]
+
+    return tuple(written)
+
+
+def _hit_tsv_row(hit: Hit) -> list:
+    """One .tsv data row for a hit, in TSV_COLUMNS order."""
+    return [
+        hit.query_id,
+        hit.query_len,
+        hit.taxid,
+        hit.species,
+        hit.accession,
+        hit.target_name,
+        hit.subject_id,
+        hit.nident,
+        hit.align_len,
+        f"{hit.identity_over_alignment:.4f}",
+        f"{hit.identity_over_query:.4f}",
+        f"{hit.bitscore:.1f}",
+        f"{hit.evalue:.2e}",
+        hit.qstart,
+        hit.qend,
+        hit.sstart,
+        hit.send,
+        hit.alignment_text.replace("\n", "\\n"),
+    ]
 
 
 def write_tsv(hits: list[Hit], path: Path) -> None:
@@ -205,28 +267,7 @@ def write_tsv(hits: list[Hit], path: Path) -> None:
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
         writer.writerow(TSV_COLUMNS)
         for hit in hits:
-            writer.writerow(
-                [
-                    hit.query_id,
-                    hit.query_len,
-                    hit.taxid,
-                    hit.species,
-                    hit.accession,
-                    hit.target_name,
-                    hit.subject_id,
-                    hit.nident,
-                    hit.align_len,
-                    f"{hit.identity_over_alignment:.4f}",
-                    f"{hit.identity_over_query:.4f}",
-                    f"{hit.bitscore:.1f}",
-                    f"{hit.evalue:.2e}",
-                    hit.qstart,
-                    hit.qend,
-                    hit.sstart,
-                    hit.send,
-                    hit.alignment_text.replace("\n", "\\n"),
-                ]
-            )
+            writer.writerow(_hit_tsv_row(hit))
 
 
 def _database_lines(taxa: list[Taxon], db_metadata: dict[int, DbMetadata]) -> list[str]:
@@ -251,6 +292,40 @@ def _database_lines(taxa: list[Taxon], db_metadata: dict[int, DbMetadata]) -> li
     return [f"Databases:  {entries[0]}"] + [f"{indent}{entry}" for entry in entries[1:]]
 
 
+def _txt_header(
+    params: SearchParams,
+    input_path: Path,
+    taxa: list[Taxon],
+    db_metadata: dict[int, DbMetadata] | None,
+    *,
+    title: str,
+    info_lines: list[str],
+) -> list[str]:
+    """The shared .txt header: title, run metadata, queried databases, scoring and
+    ranking, the caller's ``info_lines``, and the standard notes."""
+    backend, matrix_label, gaps, ranked_by = _scoring_summary(params)
+    lines: list[str] = [
+        title,
+        f"Input:      {input_path}",
+        f"Generated:  {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        f"Backend:    {backend}",
+    ]
+    if not params.remote:
+        lines += _database_lines(taxa, db_metadata or {})
+    lines += [
+        f"Matrix:     {matrix_label}    Gaps: {gaps}",
+        f"Ranked by:  {ranked_by}",
+        *info_lines,
+        "Note:       E-value is reported for reference only; it is never used as a filter.",
+    ]
+    if params.remote:
+        lines.append(
+            "Note:       Remote nr is non-redundant; a hit's listed organism may "
+            "differ from the queried taxid."
+        )
+    return lines
+
+
 def write_txt(
     hits: list[Hit],
     path: Path,
@@ -266,36 +341,13 @@ def write_txt(
     for hit in hits:
         by_group.setdefault((hit.query_id, hit.taxid), []).append(hit)
 
-    backend, matrix_label, gaps, ranked_by = _scoring_summary(params)
-    title = (
-        "FRANKENSEARCH results — best hit per query/species (ties included)"
-        if top1
-        else "FRANKENSEARCH results"
-    )
-    selection = (
-        "Selection:  best hit per (query, species); tied rank-1 hits all shown"
-        if top1
-        else f"Top hits per (query, species): {params.num_hits}"
-    )
-    lines: list[str] = [
-        title,
-        f"Input:      {input_path}",
-        f"Generated:  {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-        f"Backend:    {backend}",
-    ]
-    if not params.remote:
-        lines += _database_lines(taxa, db_metadata or {})
-    lines += [
-        f"Matrix:     {matrix_label}    Gaps: {gaps}",
-        f"Ranked by:  {ranked_by}",
-        selection,
-        "Note:       E-value is shown for reference only; results are NOT filtered by E-value.",
-    ]
-    if params.remote:
-        lines.append(
-            "Note:       Remote nr is non-redundant; a hit's listed organism may "
-            "differ from the queried taxid."
-        )
+    if top1:
+        title = "FRANKENSEARCH results — best hit per query/species (ties included)"
+        info_lines = ["Selection:  best hit per (query, species); tied rank-1 hits all shown"]
+    else:
+        title = "FRANKENSEARCH results"
+        info_lines = [f"Top hits per (query, species): {params.num_hits}"]
+    lines = _txt_header(params, input_path, taxa, db_metadata, title=title, info_lines=info_lines)
 
     # Section 1: one table of every hit (grouped by query then species in row order).
     lines += ["", "=" * 80, "HITS", "=" * 80, ""]
@@ -303,6 +355,20 @@ def write_txt(
 
     # Section 2: the BLAST-style pairwise alignments, grouped by query then species.
     lines += ["", "=" * 80, "ALIGNMENTS", "=" * 80]
+    lines += _alignment_blocks(queries, taxa, by_group, "(no hits)")
+
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _alignment_blocks(
+    queries: list[Query],
+    taxa: list[Taxon],
+    group_lookup: dict[tuple[str, int], list[Hit]],
+    empty_label: str,
+) -> list[str]:
+    """The pairwise-alignment blocks, grouped by query then species. Each
+    (query, species) with no hits shows ``empty_label`` instead."""
+    lines: list[str] = []
     for query in queries:
         lines.append("")
         lines.append("-" * 80)
@@ -311,12 +377,110 @@ def write_txt(
         for taxon in taxa:
             lines.append("")
             lines.append(f"--- {taxon.name}  (taxid {taxon.taxid}) ---")
-            group = by_group.get((query.id, taxon.taxid), [])
+            group = group_lookup.get((query.id, taxon.taxid), [])
             if not group:
-                lines.append("    (no hits)")
+                lines.append(f"    {empty_label}")
                 continue
             for rank, hit in enumerate(group, start=1):
                 lines.extend(_hit_block(rank, hit))
+    return lines
+
+
+def _passing_by_group(
+    hits: list[Hit],
+    queries: list[Query],
+    taxa: list[Taxon],
+    rank_by: str,
+    threshold: float,
+) -> tuple[dict[tuple[str, int], list[Hit]], list[tuple[Query, Taxon]]]:
+    """Split hits by (query, taxid), keeping only those whose ``rank_by`` metric
+    is ``>= threshold``. Returns (passing_by_group, no_hit_combos), where
+    no_hit_combos lists every (query, taxon) with no passing hit -- the whole
+    point of the filter: surfacing queries that match nothing."""
+    by_group: dict[tuple[str, int], list[Hit]] = {}
+    for hit in hits:
+        if rank_metric(hit, rank_by) >= threshold:
+            by_group.setdefault((hit.query_id, hit.taxid), []).append(hit)
+    no_hit = [(q, t) for q in queries for t in taxa if not by_group.get((q.id, t.taxid))]
+    return by_group, no_hit
+
+
+def write_filtered_tsv(
+    path: Path,
+    *,
+    queries: list[Query],
+    taxa: list[Taxon],
+    passing_by_group: dict[tuple[str, int], list[Hit]],
+) -> None:
+    """The .tsv of hits that passed the filter (``passing_by_group``), with a
+    leading ``status`` column. Each (query, species) with no passing hit gets one
+    row flagged ``no_hit_above_threshold`` (hit fields blank)."""
+    blanks = [""] * (len(TSV_COLUMNS) - 4)  # query_id/len/taxid/species are filled
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
+        writer.writerow(["status", *TSV_COLUMNS])
+        for query in queries:
+            for taxon in taxa:
+                passing = passing_by_group.get((query.id, taxon.taxid), [])
+                if passing:
+                    for hit in passing:
+                        writer.writerow(["hit", *_hit_tsv_row(hit)])
+                else:
+                    writer.writerow(
+                        [
+                            "no_hit_above_threshold",
+                            query.id, len(query.sequence), taxon.taxid, taxon.name,
+                            *blanks,
+                        ]
+                    )
+
+
+def write_filtered_txt(
+    path: Path,
+    *,
+    queries: list[Query],
+    taxa: list[Taxon],
+    params: SearchParams,
+    input_path: Path,
+    passing_by_group: dict[tuple[str, int], list[Hit]],
+    no_hit: list[tuple[Query, Taxon]],
+    db_metadata: dict[int, DbMetadata] | None = None,
+) -> None:
+    """The .txt of hits that passed the filter, with an explicit section listing
+    every (query, species) in ``no_hit`` -- those with no hit above the threshold."""
+    _, _, _, ranked_by = _scoring_summary(params)
+    passing_hits = [
+        h for q in queries for t in taxa for h in passing_by_group.get((q.id, t.taxid), [])
+    ]
+
+    info_lines = [
+        f"Top hits per (query, species): {params.num_hits}",
+        f"Filter:     keep hits with {ranked_by} >= {params.filter_by:g}",
+    ]
+    lines = _txt_header(
+        params,
+        input_path,
+        taxa,
+        db_metadata,
+        title="FRANKENSEARCH results — filtered",
+        info_lines=info_lines,
+    )
+
+    # Section 1: the hits that pass the threshold.
+    lines += ["", "=" * 80, "HITS ABOVE THRESHOLD", "=" * 80, ""]
+    lines += _hit_table(passing_hits, params.rank_by) if passing_hits else ["(none)"]
+
+    # Section 2: the point of the filter -- query/species combos with no hit.
+    lines += ["", "=" * 80, "QUERIES WITH NO HIT ABOVE THRESHOLD", "=" * 80, ""]
+    if no_hit:
+        for query, taxon in no_hit:
+            lines.append(f"{query.id}   {taxon.name} (taxid {taxon.taxid})")
+    else:
+        lines.append("(every query has a hit above the threshold in every species)")
+
+    # Section 3: pairwise alignments for the passing hits.
+    lines += ["", "=" * 80, "ALIGNMENTS", "=" * 80]
+    lines += _alignment_blocks(queries, taxa, passing_by_group, "(no hit above threshold)")
 
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -480,6 +644,15 @@ def write_summary(
         f"- Ranking: by {ranked_by} "
         "(both identity ratios and the alignment length are reported)",
         f"- Hits kept: top {params.num_hits} per (query, species)",
+        *(
+            [
+                f"- Filter (`_filtered_by_{params.filter_by:g}` files): keep hits with "
+                f"{ranked_by} >= {params.filter_by:g}; query/species with none are "
+                'reported as "no hit above threshold"'
+            ]
+            if params.filter_by is not None
+            else []
+        ),
         "",
         "## Software versions",
         "",
@@ -510,6 +683,13 @@ def write_summary(
             + " with composition-based statistics disabled and no E-value cutoff; hits were "
             f"ranked by {ranked_by}. The top {params.num_hits} hits per "
             "query per species were retained. "
+            + (
+                f"Hits with {ranked_by} below {params.filter_by:g} were filtered out in "
+                "a separate report, and queries with no hit at or above that threshold "
+                "were recorded. "
+                if params.filter_by is not None
+                else ""
+            )
             + (
                 "Targets were NCBI nr restricted to each species' taxonomy ID."
                 if params.remote

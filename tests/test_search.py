@@ -12,6 +12,7 @@ from frankensearch.search import (
     SearchParams,
     blastp_command,
     parse_subject,
+    rank_metric,
     render_alignment,
     run_search,
     top1_of_group,
@@ -80,6 +81,13 @@ def test_top1_alignment_length_mode():
 
 def test_top1_empty_group():
     assert top1_of_group([], "identity-alignment") == []
+
+
+def test_rank_metric_per_mode():
+    hit = _mk_hit("A", nident=9, align_len=10, query_len=20)  # qry ratio 9/20=0.45
+    assert rank_metric(hit, "identity-alignment") == pytest.approx(0.9)
+    assert rank_metric(hit, "identity-query") == pytest.approx(0.45)
+    assert rank_metric(hit, "alignment-length") == 10.0
 
 
 def test_parse_subject_uniprot():

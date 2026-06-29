@@ -224,6 +224,86 @@ def test_write_outputs_writes_five_files(tmp_path):
     assert "Top hits per (query, species):" not in top1_text
 
 
+FRANK2 = Query("frank2", "MKTAYIAKQRQISFVKSHF")
+
+
+def test_write_filtered_tsv_status_and_no_hit(tmp_path):
+    path = tmp_path / "f.tsv"
+    # frank1 has a 100% (over-alignment) hit; frank2 has none in the results.
+    passing, _ = output._passing_by_group(
+        [_hit()], [QUERY, FRANK2], [TAXON], "identity-alignment", 0.5
+    )
+    output.write_filtered_tsv(path, queries=[QUERY, FRANK2], taxa=[TAXON], passing_by_group=passing)
+    rows = list(csv.reader(path.open(), delimiter="\t"))
+    assert rows[0] == ["status", *output.TSV_COLUMNS]
+    by_query = {r[1]: r for r in rows[1:]}
+    assert by_query["frank1"][0] == "hit"
+    no_hit = by_query["frank2"]
+    assert no_hit[0] == "no_hit_above_threshold"
+    assert len(no_hit) == len(output.TSV_COLUMNS) + 1  # status + every column present
+    # query/species are filled; the hit fields are blank.
+    assert no_hit[1:5] == ["frank2", str(len(FRANK2.sequence)), "9606", "Homo sapiens"]
+    assert all(cell == "" for cell in no_hit[5:])
+
+
+def test_write_filtered_txt_lists_no_hit_queries(tmp_path):
+    path = tmp_path / "f.txt"
+    passing, no_hit = output._passing_by_group(
+        [_hit()], [QUERY, FRANK2], [TAXON], "identity-alignment", 0.5
+    )
+    output.write_filtered_txt(
+        path,
+        queries=[QUERY, FRANK2],
+        taxa=[TAXON],
+        params=SearchParams(rank_by="identity-alignment", filter_by=0.5),
+        input_path=tmp_path / "in.fasta",
+        passing_by_group=passing,
+        no_hit=no_hit,
+    )
+    text = path.read_text()
+    assert "QUERIES WITH NO HIT ABOVE THRESHOLD" in text
+    assert "frank2   Homo sapiens (taxid 9606)" in text
+    assert "keep hits with identity over alignment length >= 0.5" in text
+
+
+def test_write_filtered_txt_all_pass_message(tmp_path):
+    path = tmp_path / "f.txt"
+    passing, no_hit = output._passing_by_group(
+        [_hit()], [QUERY], [TAXON], "identity-alignment", 0.5
+    )
+    output.write_filtered_txt(
+        path,
+        queries=[QUERY],
+        taxa=[TAXON],
+        params=SearchParams(rank_by="identity-alignment", filter_by=0.5),
+        input_path=tmp_path / "in.fasta",
+        passing_by_group=passing,
+        no_hit=no_hit,
+    )
+    assert "every query has a hit above the threshold" in path.read_text()
+
+
+def test_write_outputs_with_filter_writes_seven_files(tmp_path):
+    input_file = tmp_path / "in.fasta"
+    input_file.write_text(">frank1\nMQIFVKTLTGKTITLEVEPSDT\n")
+    paths = output.write_outputs(
+        [_hit()],
+        tmp_path / "results",
+        queries=[QUERY],
+        taxa=[TAXON],
+        params=SearchParams(filter_by=0.5),
+        input_path=input_file,
+        command="frankensearch search in.fasta --taxids 9606 --filter-by 0.5",
+        frankensearch_version="0.3.0",
+        blast_versions=BLAST_VERSIONS,
+        db_metadata={},
+        top1_hits=[_hit()],
+    )
+    assert len(paths) == 7
+    assert (tmp_path / "results_filtered_by_0.5.tsv").exists()
+    assert (tmp_path / "results_filtered_by_0.5.txt").exists()
+
+
 def test_write_summary_contains_methods_info(tmp_path):
     input_file = tmp_path / "in.fasta"
     input_file.write_text(">frank1\nMQIFVKTLTGKTITLEVEPSDT\n")

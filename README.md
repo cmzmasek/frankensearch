@@ -78,6 +78,7 @@ drowns out another.
 |--------|---------|
 | `-n, --num-hits` | Top hits to report **per (query, species)** (default 10). |
 | `--rank-by {identity-alignment,identity-query,alignment-length}` | How to **rank** hits within each (query, species) group: identity ÷ alignment length (default), identity ÷ query length, or longest alignment first. Both ratios and the alignment length are always reported. |
+| `--filter-by VALUE` | Threshold on the `--rank-by` metric. Writes two extra files keeping only hits at or above it, and lists every query/species with **no** passing hit. A fraction `0–1` for the identity modes, or a residue count for `alignment-length`. See [Output](#output). |
 | `--matrix {identity,pam30,blosum45,blosum62}` | Scoring matrix; `identity` (built-in pure-identity) is the default. |
 | `--ungapped` | Ungapped alignments only. |
 | `--remote` | Search NCBI remotely instead of using local databases (see below). |
@@ -106,6 +107,12 @@ Five files are written per run, sharing the `-o/--output` prefix:
   best hit per (query, species)**. More than one row appears only on a genuine tie
   (hits the ranking cannot separate at all). This is independent of `-n`, so a tie
   is never dropped.
+- **`_filtered_by_<x>.txt` / `_filtered_by_<x>.tsv`** — *only when `--filter-by <x>`
+  is given.* Keeps just the hits whose `--rank-by` metric is ≥ `<x>`, and — the key
+  point — **explicitly lists every query/species that has no hit above the
+  threshold** (the `.txt` has a dedicated section; the `.tsv` adds a leading
+  `status` column with `hit` / `no_hit_above_threshold`). Built so you can find
+  queries that match *nothing* without post-filtering in Excel.
 - **`.summary.md`** — a methods-grade record of the run (command, input checksum,
   per-species database provenance, full effective parameters, software versions,
   references, and a ready-to-paste Methods paragraph).
