@@ -90,6 +90,14 @@ drowns out another.
 | `--dry-run` | Show the plan (parsed queries, resolved species) without searching. |
 | `--debug` | Show full tracebacks (otherwise errors are concise, friendly messages). |
 
+> **`-n` only limits the report, not the search.** BLAST retrieves up to
+> `--max-target-seqs` hits (default 5000) regardless of `-n`; those are ranked
+> locally, and `-n` just keeps the top of that ranked list. So the **best hit is
+> always kept for any `n ≥ 1`** — a small `-n` only drops lower-ranked extras (which
+> the truncation warning flags). The single best hit per (query, species) is also
+> always written to the `_top1` files, independent of `-n`. The knob that affects what
+> BLAST *finds* is `--max-target-seqs`, not `-n`.
+
 ---
 
 ## Output
