@@ -33,6 +33,7 @@ def _hit(qseq="MQIFVKT", sseq="MQIFVKT", nident=7, align_len=7, query_len=22):
         send=len(sseq),
         qseq=qseq,
         sseq=sseq,
+        query_seq=QUERY.sequence,
     )
 
 
@@ -52,7 +53,7 @@ def test_write_tsv_header_and_row(tmp_path):
 
 def test_write_tsv_output_query_adds_sequence_column(tmp_path):
     path = tmp_path / "out.tsv"
-    output.write_tsv([_hit()], path, query_seqs={"frank1": QUERY.sequence})
+    output.write_tsv([_hit()], path, output_query=True)
     rows = list(csv.reader(path.open(), delimiter="\t"))
     assert rows[0] == output.tsv_columns(True)
     record = dict(zip(rows[0], rows[1], strict=True))
@@ -61,7 +62,7 @@ def test_write_tsv_output_query_adds_sequence_column(tmp_path):
     assert rows[0].index("query_sequence") == rows[0].index("query_len") + 1
 
 
-def test_write_txt_output_query_adds_query_section(tmp_path):
+def test_write_txt_output_query_adds_query_seq_column(tmp_path):
     path = tmp_path / "out.txt"
     output.write_txt(
         [_hit()],
@@ -72,8 +73,11 @@ def test_write_txt_output_query_adds_query_section(tmp_path):
         input_path=tmp_path / "in.fasta",
     )
     text = path.read_text()
-    assert "QUERY SEQUENCES" in text
-    assert f">{QUERY.id}  (length {len(QUERY.sequence)})" in text
+    # it's a table column (after Query), not a separate section
+    assert "QUERY SEQUENCES" not in text
+    header = next(line for line in text.splitlines() if line.startswith("Query"))
+    assert "Query-Seq" in header
+    assert header.index("Query-Seq") < header.index("Species")
     assert QUERY.sequence in text
 
 
@@ -235,10 +239,10 @@ def test_write_txt_remote_shows_backend_and_fallback(tmp_path):
     assert "non-redundant" in text
 
 
-def test_write_outputs_writes_six_files(tmp_path):
+def test_write_outputs_writes_seven_files(tmp_path):
     input_file = tmp_path / "in.fasta"
     input_file.write_text(">frank1\nMQIFVKTLTGKTITLEVEPSDT\n")
-    tsv_path, txt_path, aln_path, summary_path, top1_tsv, top1_txt = output.write_outputs(
+    paths = output.write_outputs(
         [_hit()],
         tmp_path / "results",
         queries=[QUERY],
@@ -251,23 +255,25 @@ def test_write_outputs_writes_six_files(tmp_path):
         db_metadata={},
         top1_hits=[_hit()],
     )
+    tsv_path, txt_path, aln_path, summary_path, top1_tsv, top1_txt, top1_aln = paths
     assert tsv_path == tmp_path / "results.tsv" and tsv_path.exists()
     assert txt_path == tmp_path / "results.txt" and txt_path.exists()
     assert aln_path == tmp_path / "results_alignments.txt" and aln_path.exists()
     assert summary_path == tmp_path / "results.summary.md" and summary_path.exists()
     assert top1_tsv == tmp_path / "results_top1.tsv" and top1_tsv.exists()
     assert top1_txt == tmp_path / "results_top1.txt" and top1_txt.exists()
-    # The main .txt is table-only; the alignments live in the companion file.
+    assert top1_aln == tmp_path / "results_top1_alignments.txt" and top1_aln.exists()
+    # The main .txt is table-only and points to its alignments file, which has them.
     main_text = txt_path.read_text()
     assert "Sbjct" not in main_text
-    assert "_alignments.txt" in main_text
+    assert "results_alignments.txt" in main_text
     assert "Sbjct" in aln_path.read_text()
-    # The _top1.txt identifies itself, keeps its alignments inline, and uses the
-    # best-hit selection wording.
+    # The _top1.txt is also table-only now, pointing to _top1_alignments.txt.
     top1_text = top1_txt.read_text()
     assert "best hit per query/species" in top1_text
-    assert "Sbjct" in top1_text
-    assert "Top hits per (query, species):" not in top1_text
+    assert "Sbjct" not in top1_text
+    assert "results_top1_alignments.txt" in top1_text
+    assert "Sbjct" in top1_aln.read_text()
 
 
 FRANK2 = Query("frank2", "MKTAYIAKQRQISFVKSHF")
@@ -310,6 +316,10 @@ def test_write_filtered_txt_lists_no_hit_queries(tmp_path):
     assert "QUERIES WITH NO HIT ABOVE THRESHOLD" in text
     assert "frank2   Homo sapiens (taxid 9606)" in text
     assert "keep hits with identity over alignment length >= 0.5" in text
+    # frank2 has no passing hit in any species -> no alignment block for it;
+    # frank1 (which passes) keeps its block.
+    assert "Query: frank2" not in text
+    assert "Query: frank1" in text
 
 
 def test_write_filtered_txt_all_pass_message(tmp_path):
@@ -329,7 +339,7 @@ def test_write_filtered_txt_all_pass_message(tmp_path):
     assert "every query has a hit above the threshold" in path.read_text()
 
 
-def test_write_outputs_with_filter_writes_seven_files(tmp_path):
+def test_write_outputs_with_filter_writes_nine_files(tmp_path):
     input_file = tmp_path / "in.fasta"
     input_file.write_text(">frank1\nMQIFVKTLTGKTITLEVEPSDT\n")
     paths = output.write_outputs(
@@ -345,7 +355,7 @@ def test_write_outputs_with_filter_writes_seven_files(tmp_path):
         db_metadata={},
         top1_hits=[_hit()],
     )
-    assert len(paths) == 8
+    assert len(paths) == 9
     assert (tmp_path / "results_filtered_by_0.5.tsv").exists()
     assert (tmp_path / "results_filtered_by_0.5.txt").exists()
 
@@ -366,14 +376,72 @@ def test_write_outputs_no_alignments(tmp_path):
         db_metadata={},
         top1_hits=[_hit()],
     )
-    assert len(paths) == 5  # no _alignments.txt
+    assert len(paths) == 5  # no _alignments.txt or _top1_alignments.txt
     assert not (tmp_path / "results_alignments.txt").exists()
+    assert not (tmp_path / "results_top1_alignments.txt").exists()
     # main .txt has no alignments and no pointer; _top1.txt is table-only too
     main_text = (tmp_path / "results.txt").read_text()
     assert "Sbjct" not in main_text and "_alignments.txt" not in main_text
-    assert "Sbjct" not in (tmp_path / "results_top1.txt").read_text()
+    top1_text = (tmp_path / "results_top1.txt").read_text()
+    assert "Sbjct" not in top1_text and "_alignments.txt" not in top1_text
     # the compact match column survives in the .tsv
     assert "match" in (tmp_path / "results.tsv").read_text().splitlines()[0]
+
+
+def _meta_with_residues(residues=10_000_000):
+    return DbMetadata(
+        taxid=9606,
+        scientific_name="Homo sapiens",
+        rank="species",
+        proteome_set="reference",
+        query="(proteome:UP000005640)",
+        sequence_count=20000,
+        built_at="2026-06-29T00:00:00+00:00",
+        residue_count=residues,
+    )
+
+
+def test_chance_match_length():
+    assert output.chance_match_length(10_000_000, 77) == 7
+    assert output.chance_match_length(0, 77) == 0  # graceful when M unknown
+    assert output.chance_match_length(10_000_000, 0) == 0
+
+
+def test_database_line_includes_k_star(tmp_path):
+    path = tmp_path / "out.txt"
+    output.write_txt(
+        [_hit()],
+        path,
+        queries=[QUERY],
+        taxa=[TAXON],
+        params=SearchParams(),
+        input_path=tmp_path / "in.fasta",
+        db_metadata={9606: _meta_with_residues()},
+    )
+    text = path.read_text()
+    assert "10,000,000 residues" in text
+    assert "chance-match length k*≈" in text
+
+
+def test_summary_chance_reference_and_truncation_note(tmp_path):
+    path = tmp_path / "r.summary.md"
+    output.write_summary(
+        path,
+        hits=[_hit()],
+        queries=[QUERY],
+        taxa=[TAXON],
+        params=SearchParams(num_hits=10),
+        input_path=tmp_path / "in.fasta",
+        command="frankensearch search in.fasta --taxids 9606",
+        frankensearch_version="0.7.0",
+        blast_versions=BLAST_VERSIONS,
+        db_metadata={9606: _meta_with_residues()},
+        truncated_groups=3,
+    )
+    text = path.read_text()
+    assert "## Chance reference" in text
+    assert "10,000,000" in text and "Robinson" in text
+    assert "3 (query, species) group(s) had more hits than the -n cap" in text
 
 
 def test_write_summary_contains_methods_info(tmp_path):

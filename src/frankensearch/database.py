@@ -12,6 +12,7 @@ files exist, so re-running `setup` skips work unless ``--force`` is given.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import tempfile
 from dataclasses import asdict, dataclass
@@ -39,6 +40,30 @@ class DbMetadata:
     makeblastdb_version: str | None = None
     uniprot_release: str | None = None
     uniprot_release_date: str | None = None
+    residue_count: int | None = None  # total residues in the DB (for the chance model)
+
+
+def db_residue_count(taxid: int, db_dir: Path | None = None) -> int | None:
+    """Total residues in the built database, via ``blastdbcmd -info``.
+
+    Used as ``M`` in the expected-by-chance match-length model. Returns ``None``
+    (so callers degrade gracefully) if blastdbcmd is missing or its output can't
+    be parsed."""
+    blastdbcmd = find_tool("blastdbcmd")
+    if blastdbcmd is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [blastdbcmd, "-db", str(db_prefix(taxid, db_dir)), "-dbtype", "prot", "-info"],
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    match = re.search(r"([\d,]+)\s+total residues", proc.stdout)
+    return int(match.group(1).replace(",", "")) if match else None
 
 
 def species_dir(taxid: int, db_dir: Path | None = None) -> Path:
@@ -143,6 +168,7 @@ def build(
         makeblastdb_version=tool_version("makeblastdb"),
         uniprot_release=download.release,
         uniprot_release_date=download.release_date,
+        residue_count=db_residue_count(taxon.taxid, db_dir),
     )
     metadata_file(taxon.taxid, db_dir).write_text(json.dumps(asdict(meta), indent=2))
     return meta

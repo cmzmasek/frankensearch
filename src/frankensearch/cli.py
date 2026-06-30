@@ -22,6 +22,7 @@ from .output import (
     filtered_output_paths,
     hit_column_header,
     output_paths,
+    top1_alignments_output_path,
     top1_output_paths,
     write_outputs,
 )
@@ -123,12 +124,12 @@ def search(
         10, "-n", "--num-hits", min=1, help="Top hits to report per query, per species."
     ),
     rank_by: RankBy = typer.Option(
-        RankBy.identity_alignment,
+        RankBy.identity_query,
         "--rank-by",
         help=(
             "How to rank hits within each (query, species) group: "
-            "'identity-alignment' (identical residues ÷ alignment length, default), "
-            "'identity-query' (identical residues ÷ query length), or "
+            "'identity-query' (identical residues ÷ query length, default), "
+            "'identity-alignment' (identical residues ÷ alignment length), or "
             "'alignment-length' (longest alignment first). Both identity ratios and the "
             "alignment length are always reported regardless."
         ),
@@ -156,8 +157,8 @@ def search(
         False,
         "--output-query",
         help="Also report the full query sequence (in addition to its name): a "
-        "query_sequence column in the .tsv files and a QUERY SEQUENCES section in "
-        "the .txt files.",
+        "query_sequence column in the .tsv files and a Query-Seq column in the "
+        ".txt HITS tables.",
     ),
     ungapped: bool = typer.Option(False, "--ungapped", help="Only ungapped alignments."),
     seg: bool = typer.Option(
@@ -259,6 +260,8 @@ def search(
     if not no_alignments:
         all_output_paths.append(alignments_path)
     all_output_paths += [summary_path, top1_tsv_path, top1_txt_path]
+    if not no_alignments:
+        all_output_paths.append(top1_alignments_output_path(out_prefix))
     if filter_by is not None:
         all_output_paths += list(filtered_output_paths(out_prefix, filter_by))
     all_output_paths = tuple(all_output_paths)
@@ -319,6 +322,8 @@ def search(
         for taxon in targets:
             meta = database.load_metadata(taxon.taxid, db_dir)
             if meta is not None:
+                if meta.residue_count is None:  # back-fill for DBs built before this field
+                    meta.residue_count = database.db_residue_count(taxon.taxid, db_dir)
                 db_metadata[taxon.taxid] = meta
     command = "frankensearch " + " ".join(shlex.quote(arg) for arg in sys.argv[1:])
 
@@ -338,6 +343,7 @@ def search(
         },
         db_metadata=db_metadata,
         top1_hits=results.top1,
+        truncated_groups=results.truncated_groups,
     )
     files_block = "\n".join(f"  {p}" for p in all_output_paths)
     console.print(

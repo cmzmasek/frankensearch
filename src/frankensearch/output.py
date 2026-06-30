@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import math
+import statistics
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -59,6 +61,25 @@ _RANK_LABELS = {
     "identity-query": "identity over query length",
     "alignment-length": "alignment length",
 }
+
+# The "Selection:" header line for the best-hit views (_top1.txt and _top1_alignments.txt).
+_TOP1_SELECTION = "Selection:  best hit per (query, species); tied rank-1 hits all shown"
+
+# Background probability that two residues drawn from typical proteins are identical,
+# p = sum(f_i^2) over the Robinson & Robinson (1991) amino-acid frequencies. Used as
+# the null for the expected-by-chance match length k* = ln(M*Q) / ln(1/p).
+_CHANCE_MATCH_PROB = 0.0598
+
+
+def chance_match_length(db_residues: int, query_len: int, p: float = _CHANCE_MATCH_PROB) -> int:
+    """The exact-match length expected ~once by chance: k* = ln(M*Q) / ln(1/p), rounded.
+
+    A match longer than k* is above the chance background; shorter exact matches are
+    expected for short queries against a whole proteome.
+    """
+    if db_residues <= 0 or query_len <= 0:
+        return 0
+    return round(math.log(db_residues * query_len) / math.log(1.0 / p))
 
 # ASCII so the fixed-width .txt table aligns in every terminal (a Unicode arrow is
 # East-Asian-ambiguous width and would shift the column in some locales).
@@ -146,6 +167,11 @@ def alignments_output_path(out_prefix: Path) -> Path:
     return out_prefix.parent / f"{out_prefix.name}_alignments.txt"
 
 
+def top1_alignments_output_path(out_prefix: Path) -> Path:
+    """The best-hit pairwise-alignments file: _top1_alignments.txt."""
+    return out_prefix.parent / f"{out_prefix.name}_top1_alignments.txt"
+
+
 def filtered_output_paths(out_prefix: Path, filter_by: float) -> tuple[Path, Path]:
     """The two threshold-filtered files: (_filtered_by_<x>.tsv, _filtered_by_<x>.txt).
 
@@ -173,23 +199,26 @@ def write_outputs(
     blast_versions: dict[str, str | None],
     db_metadata: dict[int, DbMetadata],
     top1_hits: list[Hit],
+    truncated_groups: int = 0,
 ) -> tuple[Path, ...]:
     """Write the output files; return every path written.
 
-    Always: the compact main .tsv and .txt (table only), the bulky pairwise
-    alignments as _alignments.txt, .summary.md, and two best-hit-only views built
-    from ``top1_hits`` (the single best hit per query/species, all ties included):
-    _top1.tsv and _top1.txt. When ``params.filter_by`` is set, also writes
-    _filtered_by_<x>.tsv and _filtered_by_<x>.txt (passing hits only, with every
-    query/species that has none reported as "no hit above threshold").
+    Always: the compact (table-only) main .tsv/.txt and best-hit-only _top1.tsv/.txt
+    (the single best hit per query/species, all ties included), .summary.md, plus the
+    bulky pairwise alignments split into _alignments.txt and _top1_alignments.txt.
+    With ``--no-alignments`` neither alignments file is written. When
+    ``params.filter_by`` is set, also writes _filtered_by_<x>.tsv and
+    _filtered_by_<x>.txt (passing hits only, with every query/species that has none
+    reported as "no hit above threshold").
     """
     include_alignments = params.include_alignments
-    query_seqs = {q.id: q.sequence for q in queries} if params.output_query else None
+    output_query = params.output_query
     tsv_path, txt_path, summary_path = output_paths(out_prefix)
     alignments_path = alignments_output_path(out_prefix)
     top1_tsv_path, top1_txt_path = top1_output_paths(out_prefix)
+    top1_alignments_path = top1_alignments_output_path(out_prefix)
     tsv_path.parent.mkdir(parents=True, exist_ok=True)
-    write_tsv(hits, tsv_path, query_seqs=query_seqs)
+    write_tsv(hits, tsv_path, output_query=output_query)
     # The main .txt is always table-only; it points to _alignments.txt unless that
     # file is skipped via --no-alignments.
     write_txt(
@@ -201,7 +230,7 @@ def write_outputs(
         input_path=input_path,
         db_metadata=db_metadata,
         include_alignments=False,
-        alignments_note=include_alignments,
+        alignments_file=alignments_path.name if include_alignments else None,
     )
     written = [tsv_path, txt_path]
     if include_alignments:
@@ -226,8 +255,10 @@ def write_outputs(
         frankensearch_version=frankensearch_version,
         blast_versions=blast_versions,
         db_metadata=db_metadata,
+        truncated_groups=truncated_groups,
     )
-    write_tsv(top1_hits, top1_tsv_path, query_seqs=query_seqs)
+    # The _top1.txt is table-only too; its alignments go to _top1_alignments.txt.
+    write_tsv(top1_hits, top1_tsv_path, output_query=output_query)
     write_txt(
         top1_hits,
         top1_txt_path,
@@ -237,9 +268,23 @@ def write_outputs(
         input_path=input_path,
         db_metadata=db_metadata,
         top1=True,
-        include_alignments=include_alignments,  # inline unless --no-alignments
+        include_alignments=False,
+        alignments_file=top1_alignments_path.name if include_alignments else None,
     )
     written += [summary_path, top1_tsv_path, top1_txt_path]
+    if include_alignments:
+        write_alignments_txt(
+            top1_hits,
+            top1_alignments_path,
+            queries=queries,
+            taxa=taxa,
+            params=params,
+            input_path=input_path,
+            db_metadata=db_metadata,
+            title="FRANKENSEARCH results — pairwise alignments (best hit per query/species)",
+            info_lines=[_TOP1_SELECTION],
+        )
+        written.append(top1_alignments_path)
 
     if params.filter_by is not None:
         filt_tsv_path, filt_txt_path = filtered_output_paths(out_prefix, params.filter_by)
@@ -251,7 +296,7 @@ def write_outputs(
             queries=queries,
             taxa=taxa,
             passing_by_group=passing_by_group,
-            query_seqs=query_seqs,
+            output_query=output_query,
         )
         write_filtered_txt(
             filt_txt_path,
@@ -279,9 +324,9 @@ def tsv_columns(output_query: bool) -> list[str]:
     return cols
 
 
-def _hit_tsv_row(hit: Hit, query_sequence: str | None = None) -> list:
-    """One .tsv data row for a hit, in ``tsv_columns()`` order. When
-    ``query_sequence`` is given it is inserted right after ``query_len``."""
+def _hit_tsv_row(hit: Hit, include_query_seq: bool = False) -> list:
+    """One .tsv data row for a hit, in ``tsv_columns()`` order. With
+    ``include_query_seq`` the full query sequence is inserted after ``query_len``."""
     row = [
         hit.query_id,
         hit.query_len,
@@ -302,37 +347,46 @@ def _hit_tsv_row(hit: Hit, query_sequence: str | None = None) -> list:
         hit.send,
         hit.match_line,
     ]
-    if query_sequence is not None:
-        row.insert(2, query_sequence)
+    if include_query_seq:
+        row.insert(2, hit.query_seq)
     return row
 
 
-def write_tsv(hits: list[Hit], path: Path, *, query_seqs: dict[str, str] | None = None) -> None:
-    output_query = query_seqs is not None
+def write_tsv(hits: list[Hit], path: Path, *, output_query: bool = False) -> None:
     with open(path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
         writer.writerow(tsv_columns(output_query))
         for hit in hits:
-            seq = query_seqs.get(hit.query_id, "") if output_query else None
-            writer.writerow(_hit_tsv_row(hit, seq))
+            writer.writerow(_hit_tsv_row(hit, output_query))
 
 
-def _database_lines(taxa: list[Taxon], db_metadata: dict[int, DbMetadata]) -> list[str]:
-    """One header line per queried local database: name, taxid, count, set.
+def _database_lines(
+    taxa: list[Taxon],
+    db_metadata: dict[int, DbMetadata],
+    queries: list[Query] | None = None,
+) -> list[str]:
+    """One header line per queried local database: name, taxid, count, set, and -- when
+    the DB residue count is known -- the chance-match length k* (per species; computed
+    at the median query length, since k* barely varies across queries).
 
     Continuation lines are indented to align under the first entry, matching the
     12-column label padding of the surrounding header block.
     """
+    median_q = statistics.median(len(q.sequence) for q in queries) if queries else 0
     entries: list[str] = []
     for taxon in taxa:
         meta = db_metadata.get(taxon.taxid)
-        if meta is not None:
-            entries.append(
-                f"{meta.scientific_name} (taxid {meta.taxid}, "
-                f"{meta.sequence_count:,} sequences, {meta.proteome_set})"
-            )
-        else:
+        if meta is None:
             entries.append(f"{taxon.name} (taxid {taxon.taxid})")
+            continue
+        entry = (
+            f"{meta.scientific_name} (taxid {meta.taxid}, "
+            f"{meta.sequence_count:,} sequences, {meta.proteome_set}"
+        )
+        if meta.residue_count and median_q:
+            k = chance_match_length(meta.residue_count, int(median_q))
+            entry += f"; {meta.residue_count:,} residues, chance-match length k*≈{k}"
+        entries.append(entry + ")")
     if not entries:
         return []
     indent = " " * 12
@@ -349,9 +403,9 @@ def _txt_header(
     info_lines: list[str],
     queries: list[Query] | None = None,
 ) -> list[str]:
-    """The shared .txt header: title, run metadata, queried databases, scoring and
-    ranking, the caller's ``info_lines``, and the standard notes. With
-    ``params.output_query`` a FASTA-style QUERY SEQUENCES section is appended."""
+    """The shared .txt header: title, run metadata, queried databases (with the
+    chance-match length k*), scoring and ranking, the caller's ``info_lines``, and
+    the standard notes."""
     backend, matrix_label, gaps, ranked_by = _scoring_summary(params)
     lines: list[str] = [
         title,
@@ -360,7 +414,7 @@ def _txt_header(
         f"Backend:    {backend}",
     ]
     if not params.remote:
-        lines += _database_lines(taxa, db_metadata or {})
+        lines += _database_lines(taxa, db_metadata or {}, queries)
     lines += [
         f"Matrix:     {matrix_label}    Gaps: {gaps}",
         f"Ranked by:  {ranked_by}",
@@ -372,11 +426,6 @@ def _txt_header(
             "Note:       Remote nr is non-redundant; a hit's listed organism may "
             "differ from the queried taxid."
         )
-    if params.output_query and queries:
-        lines += ["", "=" * 80, "QUERY SEQUENCES", "=" * 80, ""]
-        for query in queries:
-            lines.append(f">{query.id}  (length {len(query.sequence)})")
-            lines.append(query.sequence)
     return lines
 
 
@@ -391,7 +440,7 @@ def write_txt(
     db_metadata: dict[int, DbMetadata] | None = None,
     top1: bool = False,
     include_alignments: bool = True,
-    alignments_note: bool = False,
+    alignments_file: str | None = None,
 ) -> None:
     by_group: dict[tuple[str, int], list[Hit]] = {}
     for hit in hits:
@@ -399,7 +448,7 @@ def write_txt(
 
     if top1:
         title = "FRANKENSEARCH results — best hit per query/species (ties included)"
-        info_lines = ["Selection:  best hit per (query, species); tied rank-1 hits all shown"]
+        info_lines = [_TOP1_SELECTION]
     else:
         title = "FRANKENSEARCH results"
         info_lines = [f"Top hits per (query, species): {params.num_hits}"]
@@ -409,7 +458,7 @@ def write_txt(
 
     # Section 1: one table of every hit (grouped by query then species in row order).
     lines += ["", "=" * 80, "HITS", "=" * 80, ""]
-    lines += _hit_table(hits, params.rank_by) if hits else ["(no hits)"]
+    lines += _hit_table(hits, params.rank_by, params.output_query) if hits else ["(no hits)"]
 
     # Section 2: the BLAST-style pairwise alignments. The bulky main file omits
     # them; it points to the companion _alignments.txt unless that file is also
@@ -417,9 +466,9 @@ def write_txt(
     if include_alignments:
         lines += ["", "=" * 80, "ALIGNMENTS", "=" * 80]
         lines += _alignment_blocks(queries, taxa, by_group, "(no hits)")
-    elif alignments_note:
+    elif alignments_file:
         lines.append("")
-        lines.append("Pairwise alignments for every hit are in the companion _alignments.txt file.")
+        lines.append(f"Pairwise alignments are in the companion {alignments_file}.")
 
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -433,9 +482,11 @@ def write_alignments_txt(
     params: SearchParams,
     input_path: Path,
     db_metadata: dict[int, DbMetadata] | None = None,
+    title: str = "FRANKENSEARCH results — pairwise alignments",
+    info_lines: list[str] | None = None,
 ) -> None:
-    """The pairwise alignments for every hit, in their own file so the main .txt
-    stays compact for large, many-query runs."""
+    """The pairwise alignments for the given hits, in their own file so the
+    table .txt stays compact for large, many-query runs."""
     by_group: dict[tuple[str, int], list[Hit]] = {}
     for hit in hits:
         by_group.setdefault((hit.query_id, hit.taxid), []).append(hit)
@@ -445,12 +496,14 @@ def write_alignments_txt(
         input_path,
         taxa,
         db_metadata,
-        title="FRANKENSEARCH results — pairwise alignments",
-        info_lines=[f"Top hits per (query, species): {params.num_hits}"],
+        title=title,
+        info_lines=info_lines or [f"Top hits per (query, species): {params.num_hits}"],
         queries=queries,
     )
     lines += ["", "=" * 80, "ALIGNMENTS", "=" * 80]
-    lines += _alignment_blocks(queries, taxa, by_group, "(no hits)")
+    lines += _alignment_blocks(
+        queries, taxa, by_group, "(no hits)", show_query_seq=params.output_query
+    )
 
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -460,14 +513,19 @@ def _alignment_blocks(
     taxa: list[Taxon],
     group_lookup: dict[tuple[str, int], list[Hit]],
     empty_label: str,
+    show_query_seq: bool = False,
 ) -> list[str]:
     """The pairwise-alignment blocks, grouped by query then species. Each
-    (query, species) with no hits shows ``empty_label`` instead."""
+    (query, species) with no hits shows ``empty_label`` instead. With
+    ``show_query_seq`` the full query sequence is printed under each query header
+    (used by the table-less _alignments.txt, where there is no Query-Seq column)."""
     lines: list[str] = []
     for query in queries:
         lines.append("")
         lines.append("-" * 80)
         lines.append(f"Query: {query.id}   (length {len(query.sequence)})")
+        if show_query_seq:
+            lines.append(query.sequence)
         lines.append("-" * 80)
         for taxon in taxa:
             lines.append("")
@@ -506,12 +564,11 @@ def write_filtered_tsv(
     queries: list[Query],
     taxa: list[Taxon],
     passing_by_group: dict[tuple[str, int], list[Hit]],
-    query_seqs: dict[str, str] | None = None,
+    output_query: bool = False,
 ) -> None:
     """The .tsv of hits that passed the filter (``passing_by_group``), with a
     leading ``status`` column. Each (query, species) with no passing hit gets one
     row flagged ``no_hit_above_threshold`` (hit fields blank)."""
-    output_query = query_seqs is not None
     blanks = [""] * (len(TSV_COLUMNS) - 4)  # query_id/len/taxid/species are filled
     with open(path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
@@ -521,8 +578,7 @@ def write_filtered_tsv(
                 passing = passing_by_group.get((query.id, taxon.taxid), [])
                 if passing:
                     for hit in passing:
-                        seq = query_seqs.get(hit.query_id, "") if output_query else None
-                        writer.writerow(["hit", *_hit_tsv_row(hit, seq)])
+                        writer.writerow(["hit", *_hit_tsv_row(hit, output_query)])
                 else:
                     prefix = [query.id, len(query.sequence)]
                     if output_query:
@@ -566,7 +622,11 @@ def write_filtered_txt(
 
     # Section 1: the hits that pass the threshold.
     lines += ["", "=" * 80, "HITS ABOVE THRESHOLD", "=" * 80, ""]
-    lines += _hit_table(passing_hits, params.rank_by) if passing_hits else ["(none)"]
+    lines += (
+        _hit_table(passing_hits, params.rank_by, params.output_query)
+        if passing_hits
+        else ["(none)"]
+    )
 
     # Section 2: the point of the filter -- query/species combos with no hit.
     lines += ["", "=" * 80, "QUERIES WITH NO HIT ABOVE THRESHOLD", "=" * 80, ""]
@@ -577,9 +637,16 @@ def write_filtered_txt(
         lines.append("(every query has a hit above the threshold in every species)")
 
     # Section 3: pairwise alignments for the passing hits (skipped with --no-alignments).
+    # Queries with no passing hit in any species are omitted here entirely -- they are
+    # already listed in the no-hit section above.
     if include_alignments:
         lines += ["", "=" * 80, "ALIGNMENTS", "=" * 80]
-        lines += _alignment_blocks(queries, taxa, passing_by_group, "(no hit above threshold)")
+        queries_with_hits = [
+            q for q in queries if any(passing_by_group.get((q.id, t.taxid)) for t in taxa)
+        ]
+        lines += _alignment_blocks(
+            queries_with_hits, taxa, passing_by_group, "(no hit above threshold)"
+        )
 
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -595,11 +662,15 @@ def cell_text(col: HitColumn, hit: Hit) -> str:
     return _truncate(text, col.max_width) if col.max_width is not None else text
 
 
-def _hit_table(hits: list[Hit], rank_by: str) -> list[str]:
-    """A fixed-width text table, one row per hit, driven by HIT_COLUMNS."""
-    headers = [hit_column_header(col, rank_by) for col in HIT_COLUMNS]
-    rows = [[cell_text(col, hit) for col in HIT_COLUMNS] for hit in hits]
-    return _format_table(headers, rows, numeric=[col.numeric for col in HIT_COLUMNS])
+def _hit_table(hits: list[Hit], rank_by: str, output_query: bool = False) -> list[str]:
+    """A fixed-width text table, one row per hit, driven by HIT_COLUMNS. With
+    ``output_query`` a full-sequence ``Query-Seq`` column is inserted after Query."""
+    columns = list(HIT_COLUMNS)
+    if output_query:
+        columns.insert(1, HitColumn("Query-Seq", lambda h: h.query_seq, in_console=False))
+    headers = [hit_column_header(col, rank_by) for col in columns]
+    rows = [[cell_text(col, hit) for col in columns] for hit in hits]
+    return _format_table(headers, rows, numeric=[col.numeric for col in columns])
 
 
 def _format_table(headers: list[str], rows: list[list[str]], *, numeric: list[bool]) -> list[str]:
@@ -669,6 +740,7 @@ def write_summary(
     frankensearch_version: str,
     blast_versions: dict[str, str | None],
     db_metadata: dict[int, DbMetadata],
+    truncated_groups: int = 0,
 ) -> None:
     """Write a methods-grade Markdown summary for reproduction / publication."""
     backend, matrix_label, gaps, ranked_by = _scoring_summary(params)
@@ -727,6 +799,33 @@ def write_summary(
             else:
                 lines.append(f"| {taxon.taxid} | {taxon.name} | ? | ? | ? | ? | ? |")
 
+    chance_metas = [
+        db_metadata[taxon.taxid]
+        for taxon in taxa
+        if db_metadata.get(taxon.taxid) and db_metadata[taxon.taxid].residue_count
+    ]
+    if chance_metas and queries:
+        median_q = int(statistics.median(len(q.sequence) for q in queries))
+        lines += [
+            "",
+            "## Chance reference",
+            "",
+            "Expected-once-by-chance exact-match length k\\* = ln(M·Q) / ln(1/p), with "
+            "background match probability p = 0.0598 (Σf_i² over the Robinson & Robinson "
+            "(1991) amino-acid frequencies), M = total database residues, and Q = query "
+            f"length (median {median_q} aa here; k\\* varies by <1 residue across queries). "
+            "Matches longer than k\\* are above the chance background; shorter exact matches "
+            "are expected for short queries.",
+            "",
+            "| Taxid | Species | DB residues (M) | k\\* |",
+            "|---|---|---|---|",
+        ]
+        for meta in chance_metas:
+            k = chance_match_length(meta.residue_count, median_q)
+            lines.append(
+                f"| {meta.taxid} | {meta.scientific_name} | {meta.residue_count:,} | {k} |"
+            )
+
     lines += [
         "",
         "## Search parameters",
@@ -743,6 +842,15 @@ def write_summary(
         f"- Ranking: by {ranked_by} "
         "(both identity ratios and the alignment length are reported)",
         f"- Hits kept: top {params.num_hits} per (query, species)",
+        *(
+            [
+                f"- Note: {truncated_groups} (query, species) group(s) had more hits than "
+                f"the -n cap ({params.num_hits}); only the top {params.num_hits} are in "
+                "these files. Re-run with a higher -n/--num-hits to capture them all."
+            ]
+            if truncated_groups
+            else []
+        ),
         *(
             [
                 f"- Filter (`_filtered_by_{params.filter_by:g}` files): keep hits with "

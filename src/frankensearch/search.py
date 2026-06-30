@@ -44,7 +44,9 @@ class SearchParams:
     word_size: int = 2
     max_target_seqs: int = 5000
     # How to rank hits: "identity-alignment", "identity-query", or "alignment-length".
-    rank_by: str = "identity-alignment"
+    # Default "identity-query": within a query group it orders by identical-residue
+    # count (query_len is constant), which is monotonic with chance surprise.
+    rank_by: str = "identity-query"
     num_hits: int = 10
     remote: bool = False
     seg: bool = False  # low-complexity (SEG) filtering; off by default
@@ -72,6 +74,9 @@ class SearchResults:
 
     hits: list[Hit]
     top1: list[Hit]
+    # Number of (query, taxid) groups that had more hits than ``num_hits`` (so the
+    # reported files show only a capped view) -- surfaced as a warning + summary note.
+    truncated_groups: int = 0
 
 
 @dataclass
@@ -93,6 +98,7 @@ class Hit:
     send: int
     qseq: str
     sseq: str
+    query_seq: str = ""  # the full query sequence (for --output-query)
 
     @property
     def identity_over_alignment(self) -> float:
@@ -200,6 +206,7 @@ def run_search(
     results: list[Hit] = []
     top1: list[Hit] = []
     capped = 0
+    truncated = 0
     for query in queries:
         for taxon in taxa:
             hits = grouped.get((query.id, taxon.taxid), [])
@@ -208,6 +215,8 @@ def run_search(
             hits.sort(key=lambda h: h.sort_key(params.rank_by), reverse=True)
             results.extend(hits[: params.num_hits])
             top1.extend(top1_of_group(hits, params.rank_by))
+            if len(hits) > params.num_hits:
+                truncated += 1
 
     if capped and on_warning is not None:
         on_warning(
@@ -215,7 +224,13 @@ def run_search(
             f"({params.max_target_seqs}); some high-identity hits may be missing. "
             "Re-run with a higher --max-target-seqs to be sure."
         )
-    return SearchResults(results, top1)
+    if truncated and on_warning is not None:
+        on_warning(
+            f"{truncated} query/species group(s) had more than {params.num_hits} hit(s); "
+            f"only the top {params.num_hits} are reported. Re-run with a higher -n/--num-hits "
+            "to see them all."
+        )
+    return SearchResults(results, top1, truncated)
 
 
 def blastp_command(query_file: Path, taxon: Taxon, params: SearchParams, db_dir) -> list[str]:
@@ -306,6 +321,7 @@ def _build_hit(parts: list[str], query: Query, taxon: Taxon) -> Hit:
         send=int(send),
         qseq=qseq,
         sseq=sseq,
+        query_seq=query.sequence,
     )
 
 

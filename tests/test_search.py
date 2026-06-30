@@ -90,6 +90,30 @@ def test_rank_metric_per_mode():
     assert rank_metric(hit, "alignment-length") == 10.0
 
 
+def test_default_rank_by_is_identity_query():
+    assert SearchParams().rank_by == "identity-query"
+
+
+def test_run_search_warns_on_num_hits_truncation(monkeypatch):
+    from frankensearch import search as search_module
+
+    # two hits in one (query, species) group; -n 1 -> the group is truncated
+    row_a = ["q0", "sp|A|X", "10", "10", "20", "1", "10", "1", "10", "50.0", "1e-5",
+             "AAAAAAAAAA", "AAAAAAAAAA", "sp|A|X protein A"]
+    row_b = ["q0", "sp|B|Y", "8", "10", "20", "1", "10", "1", "10", "40.0", "1e-3",
+             "AAAAAAAACC", "AAAAAAAAAA", "sp|B|Y protein B"]
+    monkeypatch.setattr(search_module, "_run_blastp", lambda *a, **k: [row_a, row_b])
+    query = Query("frank1", "MQIFVKTLTGKTITLEVEPSDT")
+    warnings: list[str] = []
+    results = run_search(
+        [query], [TAXON], SearchParams(remote=True, num_hits=1),
+        db_dir=Path("unused"), on_warning=warnings.append,
+    )
+    assert results.truncated_groups == 1
+    assert len(results.hits) == 1
+    assert any("num-hits" in w for w in warnings)
+
+
 def test_parse_subject_uniprot():
     acc, name = parse_subject(
         "sp|P62987|RL40_HUMAN",

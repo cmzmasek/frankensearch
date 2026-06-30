@@ -78,12 +78,12 @@ drowns out another.
 
 | Option | Meaning |
 |--------|---------|
-| `-n, --num-hits` | Top hits to report **per (query, species)** (default 10). |
-| `--rank-by {identity-alignment,identity-query,alignment-length}` | How to **rank** hits within each (query, species) group: identity ÷ alignment length (default), identity ÷ query length, or longest alignment first. Both ratios and the alignment length are always reported. |
+| `-n, --num-hits` | Top hits to report **per (query, species)** (default 10). A warning + a `.summary.md` note flag any group that had more hits than the cap. |
+| `--rank-by {identity-query,identity-alignment,alignment-length}` | How to **rank** hits within each (query, species) group: identity ÷ query length (**default**), identity ÷ alignment length, or longest alignment first. Both ratios and the alignment length are always reported. (Default is `identity-query` because, within a query, it orders by identical-residue count — i.e. by how surprising the match is under the chance model.) |
 | `--filter-by VALUE` | Threshold on the `--rank-by` metric. Writes two extra files keeping only hits at or above it, and lists every query/species with **no** passing hit. A fraction `0–1` for the identity modes, or a residue count for `alignment-length`. See [Output](#output). |
 | `--matrix {identity,pam30,blosum45,blosum62}` | Scoring matrix; `identity` (built-in pure-identity) is the default. |
 | `--no-alignments` | Skip all pairwise alignment output (no `_alignments.txt`; `_top1`/`_filtered` `.txt` become table-only). The compact `match` column is kept. |
-| `--output-query` | Also report the full query sequence (in addition to its name): a `query_sequence` column in the `.tsv` files and a `QUERY SEQUENCES` section in the `.txt` files. |
+| `--output-query` | Also report the full query sequence (in addition to its name): a `query_sequence` column in the `.tsv` files and a `Query-Seq` column in the `.txt` HITS tables. |
 | `--ungapped` | Ungapped alignments only. |
 | `--remote` | Search NCBI remotely instead of using local databases (see below). |
 | `-o, --output` | Output path prefix (defaults to the input file's name). |
@@ -94,32 +94,35 @@ drowns out another.
 
 ## Output
 
-Six files are written per run (eight with `--filter-by`), sharing the `-o/--output`
-prefix. The main `.txt`/`.tsv` are kept **compact** (one row per hit) so they stay
-manageable for large, many-query runs; the bulky pairwise alignments go to their own
-file.
+Seven files are written per run (nine with `--filter-by`), sharing the `-o/--output`
+prefix. The table outputs (`.txt`/`.tsv`) are kept **compact** (one row per hit) so
+they stay manageable for large, many-query runs; the bulky pairwise alignments go to
+their own files (skip them all with `--no-alignments`).
 
 - **`.txt`** — human-readable: a fixed-width table of every hit (query, species,
   target, **both** identity ratios, alignment length, bit score, E-value,
   query/subject start–end coordinates, and a final **match** column). The match
   column shows the query residue where the two sequences are identical and a dot
   (`.`) where they differ (e.g. `MKL.EV`). It points to the `_alignments.txt` file
-  for the full alignments. With `--output-query` it also has a `QUERY SEQUENCES`
-  section.
+  for the full alignments. With `--output-query` the HITS table gains a `Query-Seq`
+  column (right after `Query`). The header reports, per database, a **chance-match
+  length `k*`**: matches **longer** than `k*` stand out from the random-chance
+  background, while shorter exact matches are *expected* for short queries against a
+  whole proteome (see `.summary.md` for the formula). This is interpretive context,
+  not a significance filter.
 - **`.tsv`** — one row per hit for downstream processing: query ID, queried taxid +
   species, target accession + name, **both** identity ratios (over alignment length
   and over query length), bit score, E-value, alignment coordinates, and a compact
   **`match`** column (same dotted string as the `.txt`). With `--output-query` a
   `query_sequence` column is added.
 - **`_alignments.txt`** — the BLAST-style pairwise alignments for every hit, grouped
-  by query then species (kept out of the main `.txt` so it stays small). Ignore or
-  delete it if you don't need the alignments, or pass `--no-alignments` to skip all
-  alignment output entirely (this file is not written, and `_top1`/`_filtered` `.txt`
-  become table-only).
-- **`_top1.txt` / `_top1.tsv`** — the same views filtered to just the **single best
-  hit per (query, species)**, with the alignments kept inline (this view is small).
-  More than one row appears only on a genuine tie (hits the ranking cannot separate
-  at all). Independent of `-n`, so a tie is never dropped.
+  by query then species (kept out of the `.txt` so it stays small). Ignore or delete
+  it if you don't need the alignments, or pass `--no-alignments` to skip all
+  alignment output (no `_alignments.txt`/`_top1_alignments.txt` are written).
+- **`_top1.txt` / `_top1.tsv`** — the same table views filtered to just the **single
+  best hit per (query, species)**, with the alignments split off to
+  `_top1_alignments.txt`. More than one row appears only on a genuine tie (hits the
+  ranking cannot separate at all). Independent of `-n`, so a tie is never dropped.
 - **`_filtered_by_<x>.txt` / `_filtered_by_<x>.tsv`** — *only when `--filter-by <x>`
   is given.* Keeps just the hits whose `--rank-by` metric is ≥ `<x>`, and — the key
   point — **explicitly lists every query/species that has no hit above the
@@ -128,7 +131,8 @@ file.
   queries that match *nothing* without post-filtering in Excel.
 - **`.summary.md`** — a methods-grade record of the run (command, input checksum,
   per-species database provenance, full effective parameters, software versions,
-  references, and a ready-to-paste Methods paragraph).
+  references, a **chance-reference** section with the `k*` formula + `p` + per-species
+  `M`/`k*`, and a ready-to-paste Methods paragraph).
 
 > E-value is reported for reference only; it is never used to filter results.
 
