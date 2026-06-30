@@ -7,6 +7,7 @@ and keep the top-N hits per (query, taxid) ranked by the chosen ratio.
 
 from __future__ import annotations
 
+import heapq
 import subprocess
 import tempfile
 import time
@@ -115,6 +116,9 @@ class Hit:
         identity modes we first prefer the longer alignment, so a high-identity
         match over more residues outranks the same identity over fewer; in
         ``alignment-length`` mode that fallback is implied by the primary key.
+
+        NOTE: ``_sort_key_from_parts`` recomputes this exact tuple straight from the
+        raw blastp fields (to rank a row before building a Hit). Keep the two in sync.
         """
         if rank_by == "alignment-length":
             return (self.align_len, self.bitscore, -self.evalue)
@@ -162,6 +166,99 @@ def top1_of_group(sorted_hits: list[Hit], rank_by: str) -> list[Hit]:
     return tied
 
 
+def _sort_key_from_parts(parts: list[str], rank_by: str) -> tuple:
+    """The ``Hit.sort_key`` tuple computed straight from a raw tabular row, so a hit
+    can be ranked before the (comparatively costly) ``Hit`` is built. MUST stay
+    bit-identical to ``Hit.sort_key`` -- same fields, same arithmetic. Indices follow
+    ``_OUTFMT_FIELDS``: nident=2, length=3, qlen=4, bitscore=9, evalue=10."""
+    nident = int(parts[2])
+    align_len = int(parts[3])
+    bitscore = float(parts[9])
+    neg_evalue = -float(parts[10])
+    if rank_by == "alignment-length":
+        return (align_len, bitscore, neg_evalue)
+    if rank_by == "identity-query":
+        qlen = int(parts[4])
+        primary = nident / qlen if qlen else 0.0
+    else:  # identity-alignment
+        primary = nident / align_len if align_len else 0.0
+    return (primary, align_len, bitscore, neg_evalue)
+
+
+class _GroupAccumulator:
+    """Streaming top-N + rank-1 tie tracker for one (query, taxon) group.
+
+    ``add`` is fed every row BLAST returns for the group but builds a ``Hit`` (and
+    retains it) only for rows that can affect a kept result -- the ``num_hits`` best
+    (a bounded min-heap keyed by the full sort key) and the set of hits sharing the
+    single best key (the genuine rank-1 dead heat, for _top1). Rows that can't make
+    either are ranked from their raw fields and dropped without ever building a Hit.
+    It also counts the total rows (for the -n truncation warning) and detects when the
+    distinct-subject count reaches ``max_target_seqs`` (freeing the tracking set once
+    it does, since from then on only the flag matters). This keeps peak memory at the
+    kept hits, not the tens of millions of HSPs a heavy short-query run can emit."""
+
+    __slots__ = (
+        "_num_hits", "_max_targets", "_heap", "_seq", "_subjects",
+        "best_key", "tie", "total", "capped",
+    )
+
+    def __init__(self, num_hits: int, max_target_seqs: int):
+        self._num_hits = num_hits
+        self._max_targets = max_target_seqs
+        self._heap: list[tuple] = []  # min-heap of (sort_key, -seq, hit); len <= num_hits
+        self._seq = 0
+        self._subjects: set[str] | None = set()
+        self.best_key: tuple | None = None
+        self.tie: list[Hit] = []
+        self.total = 0
+        self.capped = False
+
+    def add(self, key: tuple, parts: list[str], query: Query, taxon: Taxon) -> None:
+        """Offer one tabular row (pre-ranked ``key``) to the group; build and keep a
+        ``Hit`` only if it belongs in the top-N heap or the rank-1 tie set."""
+        self.total += 1
+        if self._subjects is not None:
+            self._subjects.add(parts[1])  # sseqid
+            if len(self._subjects) >= self._max_targets:
+                self.capped = True
+                self._subjects = None  # only the flag is needed from here on
+
+        new_best = self.best_key is None or key > self.best_key
+        ties_best = not new_best and key == self.best_key
+        enters_heap = self._num_hits > 0 and (
+            len(self._heap) < self._num_hits or key > self._heap[0][0]
+        )
+        if not (new_best or ties_best or enters_heap):
+            return  # row can't affect any kept result -> never build the Hit
+
+        hit = _build_hit(parts, query, taxon)
+        if new_best:
+            self.best_key = key
+            self.tie = [hit]
+        elif ties_best:
+            self.tie.append(hit)
+        if enters_heap:
+            # -seq is the heap tie-break: among equal keys the min entry (the one
+            # evicted) is the LATEST-seen, so the heap keeps the earliest -- matching a
+            # stable descending sort + [:num_hits]. It also makes entries unique, so
+            # the hit itself is never compared. (top_hits restores order via -e[1].)
+            entry = (key, -self._seq, hit)
+            self._seq += 1
+            if len(self._heap) < self._num_hits:
+                heapq.heappush(self._heap, entry)
+            else:
+                heapq.heapreplace(self._heap, entry)
+
+    def top_hits(self, rank_by: str) -> list[Hit]:
+        """The retained hits, ranked best-first (output order preserved among ties)."""
+        # e[1] is -seq; sort by seq ascending (= -e[1]) to recover BLAST output order,
+        # then a stable descending sort by the rank key keeps ties in that order.
+        hits = [entry[2] for entry in sorted(self._heap, key=lambda e: -e[1])]
+        hits.sort(key=lambda h: h.sort_key(rank_by), reverse=True)
+        return hits
+
+
 def run_search(
     queries: list[Query],
     taxa: list[Taxon],
@@ -190,33 +287,49 @@ def run_search(
     # Use safe synthetic IDs in the FASTA so query names with spaces/odd characters
     # can't be mangled by BLAST; map back to the real Query afterwards.
     id_map = {f"q{i}": query for i, query in enumerate(queries)}
+    rank_by = params.rank_by
+    num_hits = params.num_hits
 
-    grouped: dict[tuple[str, int], list[Hit]] = {}
+    # Accumulate per (query, taxid) while streaming blastp output, keeping only the
+    # trimmed top-N and the rank-1 tie set per group -- never the full hit list. A
+    # heavy run (many short queries x a high --max-target-seqs) can emit tens of
+    # millions of HSPs; materialising them all before trimming is what made the
+    # post-BLAST phase slow and memory-hungry.
+    topn: dict[tuple[str, int], list[Hit]] = {}
+    tied: dict[tuple[str, int], list[Hit]] = {}
+    capped = 0
+    truncated = 0
     with tempfile.TemporaryDirectory() as raw:
         query_file = Path(raw) / "queries.fasta"
         query_file.write_text("".join(f">{key}\n{q.sequence}\n" for key, q in id_map.items()))
         for index, taxon in enumerate(taxa):
             if params.remote and index > 0:
                 time.sleep(_REMOTE_DELAY)  # be polite to NCBI between submissions
+            # One accumulator per query for this taxon; dropped (with its transient
+            # subject sets) before the next taxon, so peak memory stays at one taxon.
+            groups: dict[str, _GroupAccumulator] = {}
             for parts in _run_blastp(query_file, taxon, params, db_dir):
                 query = id_map[parts[0]]
-                hit = _build_hit(parts, query, taxon)
-                grouped.setdefault((query.id, taxon.taxid), []).append(hit)
+                acc = groups.get(query.id)
+                if acc is None:
+                    acc = groups[query.id] = _GroupAccumulator(num_hits, params.max_target_seqs)
+                acc.add(_sort_key_from_parts(parts, rank_by), parts, query, taxon)
+            for query_id, acc in groups.items():
+                topn[(query_id, taxon.taxid)] = acc.top_hits(rank_by)
+                tied[(query_id, taxon.taxid)] = acc.tie
+                if acc.total > num_hits:
+                    truncated += 1
+                if acc.capped:
+                    capped += 1
 
+    # Emit query-major (then taxon), matching the original output row ordering.
     results: list[Hit] = []
     top1: list[Hit] = []
-    capped = 0
-    truncated = 0
     for query in queries:
         for taxon in taxa:
-            hits = grouped.get((query.id, taxon.taxid), [])
-            if len({h.subject_id for h in hits}) >= params.max_target_seqs:
-                capped += 1
-            hits.sort(key=lambda h: h.sort_key(params.rank_by), reverse=True)
-            results.extend(hits[: params.num_hits])
-            top1.extend(top1_of_group(hits, params.rank_by))
-            if len(hits) > params.num_hits:
-                truncated += 1
+            key = (query.id, taxon.taxid)
+            results.extend(topn.get(key, []))
+            top1.extend(tied.get(key, []))
 
     if capped and on_warning is not None:
         on_warning(
@@ -226,21 +339,29 @@ def run_search(
         )
     if truncated and on_warning is not None:
         on_warning(
-            f"{truncated} query/species group(s) had more than {params.num_hits} hit(s); "
-            f"only the top {params.num_hits} are reported. Re-run with a higher -n/--num-hits "
+            f"{truncated} query/species group(s) had more than {num_hits} hit(s); "
+            f"only the top {num_hits} are reported. Re-run with a higher -n/--num-hits "
             "to see them all."
         )
     return SearchResults(results, top1, truncated)
 
 
-def blastp_command(query_file: Path, taxon: Taxon, params: SearchParams, db_dir) -> list[str]:
-    """Assemble the full blastp command for one taxon (local or remote)."""
+def blastp_command(
+    query_file: Path, taxon: Taxon, params: SearchParams, db_dir, out_path: Path | None = None
+) -> list[str]:
+    """Assemble the full blastp command for one taxon (local or remote).
+
+    With ``out_path`` set, blastp writes its tabular output to that file (``-out``)
+    instead of stdout, so a large result set is streamed from disk rather than
+    buffered in memory."""
     common = [
         "-comp_based_stats", "0",
         "-evalue", str(params.evalue),
         "-word_size", str(params.word_size),
         "-max_target_seqs", str(params.max_target_seqs),
     ]
+    if out_path is not None:
+        common += ["-out", str(out_path)]
     if params.seg:
         common += ["-seg", "yes"]  # off (blastp default) when not requested
     outfmt = ["-outfmt", "6 " + " ".join(_OUTFMT_FIELDS)]
@@ -263,37 +384,42 @@ def blastp_command(query_file: Path, taxon: Taxon, params: SearchParams, db_dir)
     ]
 
 
-def _run_blastp(query_file: Path, taxon: Taxon, params: SearchParams, db_dir) -> list[list[str]]:
-    cmd = blastp_command(query_file, taxon, params, db_dir)
-    timeout: float | None = _REMOTE_TIMEOUT if params.remote else None
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        raise UserError(
-            f"Remote BLAST timed out for taxid {taxon.taxid} ({taxon.name}).",
-            hint="NCBI may be busy. Try again, use fewer taxids, or build local databases.",
-        ) from exc
-    except OSError as exc:
-        raise DependencyError(f"Could not run blastp: {exc}") from exc
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout).strip()
-        raise UserError(
-            f"blastp failed for taxid {taxon.taxid} ({taxon.name}).",
-            hint=detail[:300] if detail else None,
-        )
+def _run_blastp(query_file: Path, taxon: Taxon, params: SearchParams, db_dir):
+    """Run blastp for one taxon and yield its tabular rows (already tab-split).
 
-    rows: list[list[str]] = []
+    blastp writes to a temp file (``-out``) which we stream line by line, so a huge
+    result set is never held in memory as one string; yielding lets ``run_search``
+    trim each group as it goes rather than collecting every HSP first."""
+    timeout: float | None = _REMOTE_TIMEOUT if params.remote else None
     n = len(_OUTFMT_FIELDS)
-    for line in proc.stdout.splitlines():
-        if not line.strip():
-            continue
-        parts = line.split("\t")
-        if len(parts) < n:
-            continue
-        if len(parts) > n:  # stitle (last) may, in theory, hold extra tabs
-            parts = parts[: n - 1] + ["\t".join(parts[n - 1:])]
-        rows.append(parts)
-    return rows
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = Path(tmp) / "hits.tsv"
+        cmd = blastp_command(query_file, taxon, params, db_dir, out_path)
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            raise UserError(
+                f"Remote BLAST timed out for taxid {taxon.taxid} ({taxon.name}).",
+                hint="NCBI may be busy. Try again, use fewer taxids, or build local databases.",
+            ) from exc
+        except OSError as exc:
+            raise DependencyError(f"Could not run blastp: {exc}") from exc
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout).strip()
+            raise UserError(
+                f"blastp failed for taxid {taxon.taxid} ({taxon.name}).",
+                hint=detail[:300] if detail else None,
+            )
+        with open(out_path, encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < n:
+                    continue
+                if len(parts) > n:  # stitle (last) may, in theory, hold extra tabs
+                    parts = parts[: n - 1] + ["\t".join(parts[n - 1:])]
+                yield parts
 
 
 def _build_hit(parts: list[str], query: Query, taxon: Taxon) -> Hit:

@@ -10,6 +10,7 @@ from frankensearch.inputs import Query
 from frankensearch.search import (
     Hit,
     SearchParams,
+    _sort_key_from_parts,
     blastp_command,
     parse_subject,
     rank_metric,
@@ -112,6 +113,116 @@ def test_run_search_warns_on_num_hits_truncation(monkeypatch):
     assert results.truncated_groups == 1
     assert len(results.hits) == 1
     assert any("num-hits" in w for w in warnings)
+
+
+def _blast_row(sub, nident, qlen=20, align_len=10, bitscore=50.0, evalue="1e-5"):
+    # One tabular row in _OUTFMT_FIELDS order (qseqid first, stitle last).
+    return ["q0", f"sp|{sub}|X", str(nident), str(align_len), str(qlen), "1", str(align_len),
+            "1", str(align_len), f"{bitscore}", evalue, "A" * align_len, "A" * align_len,
+            f"sp|{sub}|X protein {sub}"]
+
+
+def test_sort_key_from_parts_matches_hit_sort_key():
+    # The cheap pre-build key must be bit-identical to Hit.sort_key in every mode,
+    # or lazy construction could reorder results.
+    row = _blast_row("Z", 7, qlen=20, align_len=12, bitscore=33.5, evalue="2.5e-4")
+    hit = Hit(
+        query_id="q", query_len=20, taxid=9606, species="Homo sapiens",
+        subject_id="sp|Z|X", accession="Z", target_name="Z",
+        nident=7, align_len=12, bitscore=33.5, evalue=2.5e-4,
+        qstart=1, qend=12, sstart=1, send=12, qseq="A" * 12, sseq="A" * 12,
+    )
+    for mode in ("identity-query", "identity-alignment", "alignment-length"):
+        assert _sort_key_from_parts(row, mode) == hit.sort_key(mode)
+
+
+def test_run_search_ranks_best_first_through_heap(monkeypatch):
+    # Fed out of rank order; the bounded top-N heap must still emit best-first.
+    from frankensearch import search as search_module
+
+    rows = [_blast_row("M", 7), _blast_row("H", 10), _blast_row("L", 4)]
+    monkeypatch.setattr(search_module, "_run_blastp", lambda *a, **k: rows)
+    query = Query("frank1", "MQIFVKTLTGKTITLEVEPSDT")
+    results = run_search(
+        [query], [TAXON], SearchParams(remote=True, num_hits=5), db_dir=Path("unused")
+    )
+    assert [h.accession for h in results.hits] == ["H", "M", "L"]
+
+
+def test_boundary_tie_keeps_earliest_like_stable_sort(monkeypatch):
+    # Two hits (A, B) share the full sort key; a strictly-better hit (C) follows.
+    # With -n 2, a stable descending sort + [:2] keeps the EARLIEST tied hit (A),
+    # so the bounded heap must too -- [C, A], never [C, B].
+    from frankensearch import search as search_module
+
+    rows = [_blast_row("A", 5), _blast_row("B", 5), _blast_row("C", 6)]
+    monkeypatch.setattr(search_module, "_run_blastp", lambda *a, **k: rows)
+    query = Query("frank1", "M" * 20)
+    results = run_search(
+        [query], [TAXON], SearchParams(remote=True, num_hits=2), db_dir=Path("unused")
+    )
+    assert [h.accession for h in results.hits] == ["C", "A"]
+
+
+def test_top1_keeps_full_dead_heat_beyond_num_hits(monkeypatch):
+    # Three hits with an identical full sort key are a genuine rank-1 dead heat:
+    # top1 keeps all three even though -n 1 caps the main results at one.
+    from frankensearch import search as search_module
+
+    rows = [_blast_row("A", 10), _blast_row("B", 10), _blast_row("C", 10)]
+    monkeypatch.setattr(search_module, "_run_blastp", lambda *a, **k: rows)
+    query = Query("frank1", "MQIFVKTLTGKTITLEVEPSDT")
+    results = run_search(
+        [query], [TAXON], SearchParams(remote=True, num_hits=1), db_dir=Path("unused")
+    )
+    assert len(results.hits) == 1
+    assert {h.accession for h in results.top1} == {"A", "B", "C"}
+
+
+def test_lazy_build_matches_brute_force_reference(monkeypatch):
+    # Differential check: the bounded/lazy run_search must yield exactly what a naive
+    # "build every hit, sort, take top-N" reference would -- same hits in the same
+    # order (ties included) and the same top1 -- across several -n values. Small value
+    # ranges make full-key ties common, deliberately stressing boundary eviction.
+    import random
+
+    from frankensearch import search as search_module
+    from frankensearch.search import _build_hit
+
+    rng = random.Random(20260630)
+    rows = []
+    for i in range(300):
+        qid = f"q{i % 3}"  # three queries share one taxon
+        nident = rng.randint(1, 6)          # tiny ranges -> frequent full-key ties
+        align_len = rng.randint(nident, 8)
+        bitscore = float(rng.randint(1, 4))
+        evalue = rng.choice(["1e-5", "1e-3"])
+        rows.append([
+            qid, f"sp|S{i:03d}|X", str(nident), str(align_len), "20",
+            "1", str(align_len), "1", str(align_len), f"{bitscore}", evalue,
+            "A" * align_len, "A" * align_len, f"sp|S{i:03d}|X p",
+        ])
+    monkeypatch.setattr(search_module, "_run_blastp", lambda *a, **k: rows)
+    queries = [Query("q0", "M" * 20), Query("q1", "M" * 20), Query("q2", "M" * 20)]
+    by_id = {q.id: q for q in queries}
+    rank_by = "identity-query"
+
+    for num_hits in (1, 2, 3, 5, 10):
+        results = run_search(
+            queries, [TAXON], SearchParams(remote=True, num_hits=num_hits), db_dir=Path("unused")
+        )
+        grouped: dict[str, list[Hit]] = {}
+        for row in rows:
+            grouped.setdefault(row[0], []).append(_build_hit(row, by_id[row[0]], TAXON))
+        ref_hits, ref_top1 = [], []
+        for q in queries:
+            hits = grouped[q.id]
+            hits.sort(key=lambda h: h.sort_key(rank_by), reverse=True)
+            ref_hits.extend(hits[:num_hits])
+            ref_top1.extend(top1_of_group(hits, rank_by))
+
+        assert [h.subject_id for h in results.hits] == [h.subject_id for h in ref_hits]
+        assert {h.subject_id for h in results.top1} == {h.subject_id for h in ref_top1}
 
 
 def test_parse_subject_uniprot():
