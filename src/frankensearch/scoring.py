@@ -8,7 +8,8 @@ built-in matrices be selectable.
 
 For IDENTITY the only gapped costs BLAST+ allows are 15/2 (or ungapped), so we set
 those explicitly. For the other matrices we omit gap costs and let blastp use its
-own (valid) defaults.
+own (valid) defaults; those defaults are recorded below purely so the run record
+can report the exact values.
 """
 
 from __future__ import annotations
@@ -19,6 +20,15 @@ MATRICES = ("identity", "pam30", "blosum45", "blosum62")
 # per-matrix default is used.
 _GAP_COSTS: dict[str, tuple[int, int]] = {
     "identity": (15, 2),
+}
+
+# blastp's own per-matrix default gap costs (BLAST+ 2.17). We do NOT pass these on
+# the command line — blastp applies them — they exist only so gap_description can
+# report the actual open/extend used. Keep in sync with `blastp -matrix <M>`.
+_MATRIX_DEFAULT_GAPS: dict[str, tuple[int, int]] = {
+    "pam30": (9, 1),
+    "blosum45": (14, 2),
+    "blosum62": (11, 1),
 }
 
 
@@ -34,7 +44,12 @@ def gap_description(matrix: str, *, ungapped: bool) -> str:
     if ungapped:
         return "ungapped"
     costs = gap_costs(matrix)
-    return f"open {costs[0]}, extend {costs[1]}" if costs else "matrix default"
+    if costs:
+        return f"open {costs[0]}, extend {costs[1]}"
+    default = _MATRIX_DEFAULT_GAPS.get(matrix)
+    if default:
+        return f"open {default[0]}, extend {default[1]} (matrix default)"
+    return "matrix default"
 
 
 def blast_args(matrix: str, *, ungapped: bool) -> list[str]:

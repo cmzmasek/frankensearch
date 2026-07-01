@@ -23,8 +23,15 @@ def test_matrix_name_is_uppercased():
 
 def test_gap_description():
     assert scoring.gap_description("identity", ungapped=False) == "open 15, extend 2"
-    assert scoring.gap_description("blosum62", ungapped=False) == "matrix default"
     assert scoring.gap_description("identity", ungapped=True) == "ungapped"
+    # Non-identity matrices report blastp's actual default gap costs, tagged as such.
+    defaults = {
+        "pam30": "open 9, extend 1 (matrix default)",
+        "blosum45": "open 14, extend 2 (matrix default)",
+        "blosum62": "open 11, extend 1 (matrix default)",
+    }
+    for matrix, expected in defaults.items():
+        assert scoring.gap_description(matrix, ungapped=False) == expected
 
 
 def test_remote_args_identity_falls_back_to_pam30():
