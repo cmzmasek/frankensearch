@@ -146,6 +146,41 @@ their own files (skip them all with `--no-alignments`).
 
 ---
 
+## Matrix choice changes how junctions align
+
+Because a query is an artificial fusion, its two halves often come from
+different positions of the *same* target protein — farther apart there than in
+the query. Reporting the fusion as **one** alignment then requires opening a gap
+across the junction, and whether BLAST does that depends on the **gap cost**,
+which is tied to `--matrix`:
+
+- `--matrix identity` is forced to gap **open 15 / extend 2** (the only gapped
+  costs BLAST+ allows for the IDENTITY matrix).
+- the other matrices use blastp's cheaper per-matrix default (e.g. PAM30 =
+  **open 9 / extend 1**).
+
+Cheap gaps let BLAST **stitch** both flanks into a single alignment; expensive
+gaps make it cheaper to report **two** separate HSPs, one per flank. Since
+`identity-query` divides identical residues by query length *for the best single
+HSP*, splitting the match roughly halves that ratio — so the same query can
+clear a `--filter-by 0.7` threshold under PAM30 but not under `identity`:
+
+```
+query  GQVFGLYKNTCVGS GGSGGGGSGG CTERLKLFAAETLK   (two SARS fragments + GS linker)
+
+identity  -> 2 HSPs:  14/38 = 0.37  and  14/38 = 0.37   (below 0.7)
+pam30     -> 1 HSP:   29/38 = 0.76                        (above 0.7)
+```
+
+Neither is "more correct" — both find the same identical residues, just packaged
+differently. If you do **not** want alignments bridging the synthetic linker
+(cleaner for chance detection), keep `identity` or add `--ungapped`; if you
+**do** want the whole fusion scored as one span, use a non-identity matrix. This
+is also why `--remote`, which falls back to PAM30, can report more or longer
+single-HSP hits than a local identity run.
+
+---
+
 ## Local vs. remote
 
 - **Local (default, recommended).** `setup` downloads each species' UniProt proteome
