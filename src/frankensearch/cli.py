@@ -19,8 +19,10 @@ from .output import (
     HIT_COLUMNS,
     alignments_output_path,
     cell_text,
+    exec_summary_output_path,
     filtered_output_paths,
     hit_column_header,
+    labels_are_junctions,
     output_paths,
     top1_alignments_output_path,
     top1_output_paths,
@@ -160,6 +162,14 @@ def search(
         "query_sequence column in the .tsv files and a Query-Seq column in the "
         ".txt HITS tables.",
     ),
+    exec_summary: bool = typer.Option(
+        False,
+        "--exec-summary",
+        help="Also write <prefix>_executive_summary.txt: a plain-language, per-construct "
+        "roll-up (strongest match + up to 5 distinct proteins per species, with a "
+        "full-query alignment). Needs junction-style query IDs "
+        "(file|seq|motif_N|start_end, as produced by extract_junctions.py).",
+    ),
     ungapped: bool = typer.Option(False, "--ungapped", help="Only ungapped alignments."),
     seg: bool = typer.Option(
         False, "--seg/--no-seg", help="Low-complexity (SEG) filtering (off by default)."
@@ -226,6 +236,16 @@ def search(
     for message in parsed.warnings:
         warn(message)
 
+    # --exec-summary needs junction-style query IDs; skip (don't fail) otherwise.
+    exec_summary_ok = exec_summary
+    if exec_summary and not labels_are_junctions(parsed.records):
+        warn(
+            "--exec-summary needs query IDs shaped like 'file|seq|motif_N|start_end' "
+            "(as produced by extract_junctions.py); this run's IDs don't match, so the "
+            "executive summary is skipped."
+        )
+        exec_summary_ok = False
+
     targets = _resolve_species(taxid_list, db_dir=db_dir, prefer_metadata=not remote)
 
     matrix_desc = matrix.value
@@ -246,6 +266,13 @@ def search(
         table.add_row("Alignments", "off (--no-alignments)")
     if output_query:
         table.add_row("Query sequence", "included in outputs")
+    if exec_summary:
+        table.add_row(
+            "Executive summary",
+            "included"
+            if exec_summary_ok
+            else "requested, but skipped (query IDs are not junction-style)",
+        )
     table.add_row("Matrix", matrix_desc)
     table.add_row("Gaps", scoring.gap_description(matrix.value, ungapped=ungapped))
     table.add_row("SEG filter", "on" if seg else "off")
@@ -264,6 +291,8 @@ def search(
         all_output_paths.append(top1_alignments_output_path(out_prefix))
     if filter_by is not None:
         all_output_paths += list(filtered_output_paths(out_prefix, filter_by))
+    if exec_summary_ok:
+        all_output_paths.append(exec_summary_output_path(out_prefix))
     all_output_paths = tuple(all_output_paths)
     table.add_row("Outputs", "\n".join(str(p) for p in all_output_paths))
     console.print(table)
@@ -302,6 +331,7 @@ def search(
         filter_by=filter_by,
         include_alignments=not no_alignments,
         output_query=output_query,
+        exec_summary=exec_summary_ok,
     )
     status = (
         "Searching NCBI remotely (this can take a while)…"

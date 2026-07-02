@@ -62,6 +62,11 @@ class SearchParams:
     # a query_sequence column in the .tsv files and a QUERY SEQUENCES section in
     # the .txt files (the query name is always reported regardless).
     output_query: bool = False
+    # When True (--exec-summary), also write a plain-language _executive_summary.txt
+    # rolling up, per construct (seq) x species, the strongest match and top-5
+    # distinct target proteins. Requires junction-style query ids; the CLI gates on
+    # that and clears this flag (with a warning) when the labels don't match.
+    exec_summary: bool = False
 
 
 @dataclass

@@ -12,6 +12,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import math
+import re
 import statistics
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -310,6 +311,18 @@ def write_outputs(
             include_alignments=include_alignments,
         )
         written += [filt_tsv_path, filt_txt_path]
+
+    if params.exec_summary:
+        exec_path = exec_summary_output_path(out_prefix)
+        write_exec_summary(
+            exec_path,
+            hits,
+            queries=queries,
+            taxa=taxa,
+            params=params,
+            input_path=input_path,
+        )
+        written.append(exec_path)
 
     return tuple(written)
 
@@ -860,6 +873,15 @@ def write_summary(
             if params.filter_by is not None
             else []
         ),
+        *(
+            [
+                "- Executive summary (`_executive_summary.txt`): per-construct strongest "
+                "match + up to 5 distinct target proteins per species (requires "
+                "junction-style query IDs)"
+            ]
+            if params.exec_summary
+            else []
+        ),
         "",
         "## Software versions",
         "",
@@ -907,4 +929,263 @@ def write_summary(
         ),
         "",
     ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Executive summary
+#
+# A plain-language roll-up for a non-technical reader (e.g. a time-poor
+# executive). Only meaningful when query ids carry the junction structure that
+# extract_junctions.py emits: "<source_file>|<seq>|motif_<N>|<start>_<end>".
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class JunctionLabel:
+    """The four fields of an ``extract_junctions.py`` query id, e.g.
+    ``sample.tsv|seq2117|motif_10|936_974``."""
+
+    source: str
+    seq: str
+    motif: str
+    start: int
+    end: int
+
+
+_JUNCTION_SPAN = re.compile(r"^(\d+)_(\d+)$")
+
+# The executive summary standardises on a 100-column width (wider than the classic
+# 80 so the alignment blocks stay readable). Rules span this width and the lines we
+# render stay within it: long protein and species names are truncated to fit.
+# Accessions are the one exception -- they are shown in full (never truncated), so a
+# hit with an unusually long accession can run slightly over.
+_EXEC_WIDTH = 100
+
+# Residues per alignment line. An alignment row is
+#   [6-space indent]"Query  "[6-col coord]"  "[residues]"  "[end coord]
+# so the overhead is 6+7+6+2+2 = 23 plus the trailing coordinate. Budgeting 7 for
+# that coordinate (no real protein exceeds ~35 kaa = 5 digits) leaves 100-30 = 70,
+# so a typical junction-peptide alignment fits on a single line instead of spilling
+# a few residues onto a second.
+_EXEC_ALN_WIDTH = _EXEC_WIDTH - 30
+
+
+def parse_junction_label(query_id: str) -> JunctionLabel | None:
+    """Parse an ``extract_junctions.py`` query id, or return ``None`` when it does
+    not match the 4-field ``file|seq|motif_N|start_end`` shape -- so callers can
+    skip the executive summary rather than emit nonsense."""
+    parts = query_id.split("|")
+    if len(parts) != 4:
+        return None
+    source, seq, motif, span = parts
+    span_match = _JUNCTION_SPAN.match(span)
+    if not (source and seq and motif.startswith("motif") and span_match):
+        return None
+    return JunctionLabel(source, seq, motif, int(span_match.group(1)), int(span_match.group(2)))
+
+
+def labels_are_junctions(queries: list[Query]) -> bool:
+    """True only when every query id parses as a junction label -- the precondition
+    for producing an executive summary."""
+    return bool(queries) and all(parse_junction_label(q.id) is not None for q in queries)
+
+
+def exec_summary_output_path(out_prefix: Path) -> Path:
+    """The executive-summary file: _executive_summary.txt."""
+    return out_prefix.parent / f"{out_prefix.name}_executive_summary.txt"
+
+
+def _fit_species(prefix: str, taxon: Taxon, gap: str = " ") -> str:
+    """A species line ``<prefix><name><gap>(taxid N)`` with the name truncated so the
+    whole line stays within the 100-column width even for long scientific names."""
+    suffix = f"{gap}(taxid {taxon.taxid})"
+    name = _truncate(taxon.name, _EXEC_WIDTH - len(prefix) - len(suffix))
+    return f"{prefix}{name}{suffix}"
+
+
+def _exec_sort_key(hit: Hit) -> tuple:
+    """Executive-summary ranking: % identity over query length, then longer
+    alignment, then lower E-value, then earlier subject start. Deliberately
+    differs from the main ranking (no bit score; subject start as final tiebreak)."""
+    return (hit.identity_over_query, hit.align_len, -hit.evalue, -hit.sstart)
+
+
+def _full_query_alignment(hit: Hit, width: int = _EXEC_ALN_WIDTH) -> list[str]:
+    """A pairwise alignment drawn against the COMPLETE query sequence: residues of
+    the construct outside the matched region (the fusion's non-matching flanks) are
+    still printed on the Query line with a blank subject beneath, so the reader sees
+    how much of the whole construct the match covers -- not just the HSP."""
+    full_q = hit.query_seq or hit.qseq.replace("-", "")
+    left = full_q[: hit.qstart - 1]
+    right = full_q[hit.qend :]
+    bars = "".join(
+        "|" if q == s and q != "-" else " " for q, s in zip(hit.qseq, hit.sseq, strict=True)
+    )
+    q_row = left + hit.qseq + right
+    m_row = " " * len(left) + bars + " " * len(right)
+    s_row = " " * len(left) + hit.sseq + " " * len(right)
+
+    lines: list[str] = []
+    qpos, spos = 1, hit.sstart
+    for i in range(0, len(q_row), width):
+        qseg, mseg, sseg = q_row[i : i + width], m_row[i : i + width], s_row[i : i + width]
+        q_res = sum(1 for c in qseg if c != "-")  # q_row has no spaces
+        s_res = sum(1 for c in sseg if c not in "- ")  # subject residues (flank = space)
+        q_end = qpos + q_res - 1 if q_res else qpos
+        s_lo = f"{spos:>6}" if s_res else " " * 6
+        s_hi = f"  {spos + s_res - 1}" if s_res else ""
+        lines.append(f"Query  {qpos:>6}  {qseg}  {q_end}".rstrip())
+        lines.append(f"       {'':>6}  {mseg}".rstrip())
+        lines.append(f"Sbjct  {s_lo}  {sseg}{s_hi}".rstrip())
+        lines.append("")
+        qpos += q_res
+        spos += s_res
+    while lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def _exec_best_match(hit: Hit) -> list[str]:
+    """The headline block for one (construct, species): the strongest match with a
+    full-query alignment."""
+    label = parse_junction_label(hit.query_id)
+    motif = label.motif if label else "?"
+    span = f"{label.start}-{label.end}" if label else "?"
+    block = [
+        "",
+        "    STRONGEST MATCH",
+        f"      Protein : {_truncate(hit.target_name, 68)}  ({hit.accession})",
+        f"      Identity: {hit.identity_over_query * 100:.0f}% of the query is identical to "
+        f"this protein ({hit.nident} of {hit.query_len} residues)",
+        f"      Junction: {motif}, residues {span} of the source sequence",
+        f"      Details : alignment length {hit.align_len}, E-value {hit.evalue:.1e}, "
+        f"query {hit.qstart}-{hit.qend}, subject {hit.sstart}-{hit.send}",
+        "",
+    ]
+    block += ["      " + line for line in _full_query_alignment(hit)]
+    return block
+
+
+def _exec_other_targets(reps: list[Hit]) -> list[str]:
+    """The compact ranked list of up to five distinct proteins the construct
+    resembles. The E-value column lets the reader tell biologically meaningful hits
+    (low E-value) from chance matches (E-value near 1). Row 1 is the headline,
+    flagged with ``*`` (shown in full above)."""
+    lines = [
+        "",
+        "    TOP DISTINCT PROTEINS THIS CONSTRUCT RESEMBLES  (ranked by % of query identical)",
+        f"      {'%qry':>5}  {'E-value':>8}  {'Protein':<40}  {'Accession':<10}  Junction",
+    ]
+    for rank, hit in enumerate(reps, start=1):
+        label = parse_junction_label(hit.query_id)
+        motif = label.motif if label else "?"
+        pct = f"{hit.identity_over_query * 100:.1f}"
+        evalue = f"{hit.evalue:.1e}"
+        name = _truncate(hit.target_name, 40)
+        mark = " *" if rank == 1 else ""
+        lines.append(f"      {pct:>5}  {evalue:>8}  {name:<40}  {hit.accession:<10}  {motif}{mark}")
+    lines.append("      * strongest match, shown in full above")
+    return lines
+
+
+def _exec_construct_block(
+    source: str,
+    seq: str,
+    taxa: list[Taxon],
+    by_seq_species: dict[tuple[str, str, int], list[Hit]],
+) -> list[str]:
+    """The full block for one construct: a per-species headline + top-5 list."""
+    rule = "=" * _EXEC_WIDTH
+    lines = ["", rule, f"CONSTRUCT  {seq}", f"source file: {source}", rule]
+    for taxon in taxa:
+        lines += ["", _fit_species("  vs ", taxon, gap="  ")]
+        group = by_seq_species.get((source, seq, taxon.taxid), [])
+        if not group:
+            lines.append("     (no hits in this species)")
+            continue
+        ranked = sorted(group, key=_exec_sort_key, reverse=True)
+        reps: list[Hit] = []
+        seen: set[str] = set()
+        for hit in ranked:  # collapse by target name -> up to 5 distinct proteins
+            if hit.target_name in seen:
+                continue
+            seen.add(hit.target_name)
+            reps.append(hit)
+            if len(reps) == 5:
+                break
+        lines += _exec_best_match(reps[0])
+        lines += _exec_other_targets(reps)
+    return lines
+
+
+def _exec_header(params: SearchParams, input_path: Path, taxa: list[Taxon]) -> list[str]:
+    backend, matrix_label, _, _ = _scoring_summary(params)
+    lines = [
+        "FRANKENSEARCH — EXECUTIVE SUMMARY",
+        "",
+        'What this is: each input construct ("seq") is an artificial fusion peptide,',
+        "cut into overlapping junction windows (motifs). For every species searched,",
+        "this report shows the one protein each construct most resembles by chance",
+        "(its strongest match, with a full-length alignment), then up to five distinct",
+        'proteins it resembles. Matches are ranked by "% of query identical" — the',
+        "fraction of the construct's residues identical to the target protein. This is",
+        "a chance-similarity screen, NOT evidence of homology or biological function.",
+        "",
+        f"Input:      {input_path}",
+        f"Generated:  {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        f"Backend:    {backend}",
+    ]
+    for i, taxon in enumerate(taxa):  # compact species list (one per line)
+        lines.append(_fit_species("Species:    " if i == 0 else " " * 12, taxon))
+    lines += [
+        f"Matrix:     {matrix_label}",
+        "Ranked by:  % of query identical (ties: longer alignment, then lower E-value,",
+        "            then earlier subject position)",
+    ]
+    return lines
+
+
+def write_exec_summary(
+    path: Path,
+    hits: list[Hit],
+    *,
+    queries: list[Query],
+    taxa: list[Taxon],
+    params: SearchParams,
+    input_path: Path,
+) -> None:
+    """Write the plain-language executive summary: per construct (seq) x species, the
+    single strongest chance-similarity match (with a full-query alignment) plus up to
+    five distinct target proteins it resembles. Requires junction-style query ids
+    (see ``parse_junction_label``); callers gate on ``labels_are_junctions``."""
+    by_seq_species: dict[tuple[str, str, int], list[Hit]] = {}
+    for hit in hits:
+        label = parse_junction_label(hit.query_id)
+        if label is None:
+            continue  # non-junction ids are ignored (caller should have gated already)
+        by_seq_species.setdefault((label.source, label.seq, hit.taxid), []).append(hit)
+
+    # Construct order = first appearance in the query list; keep only constructs that
+    # produced at least one hit in at least one species.
+    seq_order: list[tuple[str, str]] = []
+    seen_seq: set[tuple[str, str]] = set()
+    for query in queries:
+        label = parse_junction_label(query.id)
+        if label is None:
+            continue
+        key = (label.source, label.seq)
+        if key in seen_seq:
+            continue
+        seen_seq.add(key)
+        if any((label.source, label.seq, t.taxid) in by_seq_species for t in taxa):
+            seq_order.append(key)
+
+    lines = _exec_header(params, input_path, taxa)
+    for source, seq in seq_order:
+        lines += _exec_construct_block(source, seq, taxa, by_seq_species)
+    if not seq_order:
+        lines += ["", "(no constructs had any hits to summarise)"]
+    else:
+        lines += ["", "=" * _EXEC_WIDTH, f"{len(seq_order)} construct(s) summarised."]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

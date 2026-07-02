@@ -481,3 +481,184 @@ def test_write_summary_contains_methods_info(tmp_path):
     assert "2026_02" in text  # UniProt release
     assert "Suggested methods text" in text
     assert "BLAST+" in text  # a reference is present
+
+
+# --- Executive summary -----------------------------------------------------
+
+MOUSE = Taxon(10090, "Mus musculus", "species")
+FULL_Q = "ABCDEFGHIJKLMNOPQRST"  # 20 aa construct
+
+
+def _jhit(
+    motif="motif_1",
+    *,
+    seq="seq1",
+    source="s.tsv",
+    target_name="Prot X",
+    accession="PX",
+    taxid=9606,
+    species="Homo sapiens",
+    nident=10,
+    align_len=10,
+    qstart=1,
+    qend=10,
+    sstart=5,
+    span=(1, 20),
+):
+    query_id = f"{source}|{seq}|{motif}|{span[0]}_{span[1]}"
+    qseq = FULL_Q[qstart - 1 : qend]
+    sseq = qseq[:nident] + "X" * (align_len - nident)
+    return Hit(
+        query_id=query_id,
+        query_len=len(FULL_Q),
+        taxid=taxid,
+        species=species,
+        subject_id=f"sp|{accession}|X",
+        accession=accession,
+        target_name=target_name,
+        nident=nident,
+        align_len=align_len,
+        bitscore=50.0,
+        evalue=1e-9,
+        qstart=qstart,
+        qend=qend,
+        sstart=sstart,
+        send=sstart + align_len - 1,
+        qseq=qseq,
+        sseq=sseq,
+        query_seq=FULL_Q,
+    )
+
+
+def test_parse_junction_label():
+    label = output.parse_junction_label("sample.tsv|seq2117|motif_10|936_974")
+    assert label is not None
+    assert (label.source, label.seq, label.motif) == ("sample.tsv", "seq2117", "motif_10")
+    assert (label.start, label.end) == (936, 974)
+    # Non-junction ids do not parse.
+    assert output.parse_junction_label("frank1") is None
+    assert output.parse_junction_label("a|b|c") is None  # only 3 fields
+    assert output.parse_junction_label("a|b|motif_1|not_a_span") is None
+
+
+def test_labels_are_junctions():
+    assert output.labels_are_junctions([Query("s.tsv|seq1|motif_1|1_20", FULL_Q)])
+    assert not output.labels_are_junctions([QUERY])  # "frank1"
+    assert not output.labels_are_junctions([])
+
+
+def test_write_exec_summary_collapses_and_shows_full_query(tmp_path):
+    path = tmp_path / "r_executive_summary.txt"
+    queries = [Query("s.tsv|seq1|motif_1|1_20", FULL_Q)]
+    hits = [
+        _jhit("motif_1", target_name="Prot X", accession="PX", nident=10),  # best, id 0.50
+        _jhit("motif_1", target_name="Prot X", accession="PX", nident=8),  # dup target
+        _jhit("motif_2", target_name="Prot Y", accession="PY", nident=6, span=(20, 40)),
+    ]
+    output.write_exec_summary(
+        path, hits, queries=queries, taxa=[TAXON], params=SearchParams(exec_summary=True),
+        input_path=tmp_path / "in.fasta",
+    )
+    text = path.read_text()
+    assert "EXECUTIVE SUMMARY" in text
+    assert "CONSTRUCT  seq1" in text
+    assert "vs Homo sapiens" in text
+    assert "STRONGEST MATCH" in text
+    # Headline is the best Prot X hit (50% of the 20-aa query).
+    assert "50% of the query is identical" in text
+    # Collapsed by target: exactly one Prot X row and one Prot Y row in the list.
+    body = text.split("TOP DISTINCT PROTEINS", 1)[1]
+    assert body.count("Prot X") == 1
+    assert "Prot Y" in body
+    # The list carries an E-value column with each hit's value.
+    assert "E-value" in body
+    assert "1.0e-09" in body
+    # Full-query alignment shows the un-aligned flank residues (11-20), not just the HSP.
+    assert "KLMNOPQRST" in text
+
+
+def test_exec_summary_lines_stay_within_100(tmp_path):
+    # The document standardises on a 100-column width; a very long protein name and a
+    # very long species name must be truncated so no rendered line exceeds it (both
+    # the header "Species:" line and the per-construct "vs" line). The one exemption
+    # is the echoed input path (data, not layout — like the Databases lines elsewhere).
+    path = tmp_path / "r_executive_summary.txt"
+    queries = [Query("s.tsv|seq1|motif_1|1_20", FULL_Q)]
+    hits = [_jhit("motif_1", target_name="Very long protein name " * 6, accession="A0A0B4J1F4")]
+    long_name = "Long organism scientific name with strain suffix " * 3  # ~145 chars
+    long_species = Taxon(2697049, long_name, "species")
+    output.write_exec_summary(
+        path, hits, queries=queries, taxa=[TAXON, long_species],
+        params=SearchParams(exec_summary=True), input_path=tmp_path / "in.fasta",
+    )
+    for line in path.read_text().splitlines():
+        if line.startswith("Input:"):
+            continue
+        assert len(line) <= 100, f"line exceeds 100 chars ({len(line)}): {line!r}"
+
+
+def test_write_exec_summary_per_species_and_no_hit(tmp_path):
+    path = tmp_path / "r_executive_summary.txt"
+    queries = [Query("s.tsv|seq1|motif_1|1_20", FULL_Q)]
+    # A hit only in human; mouse should be reported as no-hit for this construct.
+    hits = [_jhit("motif_1", taxid=9606, species="Homo sapiens")]
+    output.write_exec_summary(
+        path, hits, queries=queries, taxa=[TAXON, MOUSE], params=SearchParams(exec_summary=True),
+        input_path=tmp_path / "in.fasta",
+    )
+    text = path.read_text()
+    assert "vs Homo sapiens" in text
+    assert "vs Mus musculus" in text
+    assert "no hits in this species" in text
+
+
+def test_full_query_alignment_covers_whole_query_with_flanks():
+    # A partial match (query 3-12 of a 20-aa construct): the full query must still be
+    # drawn, with the un-aligned flanks (1-2 and 13-20) on the Query line.
+    hit = _jhit("motif_1", nident=10, align_len=10, qstart=3, qend=12, sstart=5)
+    lines = output._full_query_alignment(hit)
+    q_lines = [line for line in lines if line.startswith("Query")]
+    assert q_lines[0].split()[1] == "1"  # numbering starts at the first query residue
+    assert q_lines[-1].split()[-1] == "20"  # ...and ends at the last (whole query shown)
+    assert "AB" in q_lines[0]  # left flank
+    assert "MNOPQRST" in "\n".join(lines)  # right flank
+    s_lines = [line for line in lines if line.startswith("Sbjct")]
+    assert s_lines[0].split()[1] == "5"  # subject numbering starts at sstart
+
+
+def test_full_query_alignment_uses_wide_lines_within_100():
+    # A 70-residue alignment against a large-coordinate subject must fit on ONE line
+    # (no 60/10 spill) and still stay within 100 columns once indented.
+    seq70 = "ACDEFGHIKLMNPQRSTVWY" * 3 + "ACDEFGHIKL"  # 70 aa
+    hit = Hit(
+        query_id="s.tsv|seq1|motif_1|1_70", query_len=70, taxid=9606, species="Homo sapiens",
+        subject_id="sp|Q8WZ42|TITIN", accession="Q8WZ42", target_name="Titin",
+        nident=70, align_len=70, bitscore=100.0, evalue=1e-30,
+        qstart=1, qend=70, sstart=34001, send=34070, qseq=seq70, sseq=seq70, query_seq=seq70,
+    )
+    lines = output._full_query_alignment(hit)
+    query_lines = [line for line in lines if line.startswith("Query")]
+    assert len(query_lines) == 1  # all 70 residues on one line
+    # Indented into the block, the widest line still respects the 100-col budget.
+    assert all(len("      " + line) <= 100 for line in lines)
+
+
+def test_write_outputs_with_exec_summary_writes_extra_file(tmp_path):
+    out_prefix = tmp_path / "r"
+    queries = [Query("s.tsv|seq1|motif_1|1_20", FULL_Q)]
+    written = output.write_outputs(
+        [_jhit("motif_1")],
+        out_prefix,
+        queries=queries,
+        taxa=[TAXON],
+        params=SearchParams(exec_summary=True),
+        input_path=tmp_path / "in.fasta",
+        command="cmd",
+        frankensearch_version="0.1.0",
+        blast_versions=BLAST_VERSIONS,
+        db_metadata={},
+        top1_hits=[_jhit("motif_1")],
+    )
+    exec_path = output.exec_summary_output_path(out_prefix)
+    assert exec_path in written
+    assert exec_path.exists()

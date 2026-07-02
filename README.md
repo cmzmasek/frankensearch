@@ -84,6 +84,7 @@ drowns out another.
 | `--matrix {identity,pam30,blosum45,blosum62}` | Scoring matrix; `identity` (built-in pure-identity) is the default. |
 | `--no-alignments` | Skip all pairwise alignment output (no `_alignments.txt`; `_top1`/`_filtered` `.txt` become table-only). The compact `match` column is kept. |
 | `--output-query` | Also report the full query sequence (in addition to its name): a `query_sequence` column in the `.tsv` files and a `Query-Seq` column in the `.txt` HITS tables. |
+| `--exec-summary` | Also write `<prefix>_executive_summary.txt`: a plain-language, per-construct roll-up — each construct's strongest match plus up to five distinct proteins it resembles, per species, with a full-query alignment. Needs junction-style query IDs (as produced by `extract_junctions.py`); skipped with a warning otherwise. See [Executive summary](#executive-summary). |
 | `--ungapped` | Ungapped alignments only. |
 | `--remote` | Search NCBI remotely instead of using local databases (see below). |
 | `-o, --output` | Output path prefix (defaults to the input file's name). |
@@ -102,10 +103,11 @@ drowns out another.
 
 ## Output
 
-Seven files are written per run (nine with `--filter-by`), sharing the `-o/--output`
-prefix. The table outputs (`.txt`/`.tsv`) are kept **compact** (one row per hit) so
-they stay manageable for large, many-query runs; the bulky pairwise alignments go to
-their own files (skip them all with `--no-alignments`).
+Seven files are written per run (nine with `--filter-by`, plus one with
+`--exec-summary`), sharing the `-o/--output` prefix. The table outputs
+(`.txt`/`.tsv`) are kept **compact** (one row per hit) so they stay manageable for
+large, many-query runs; the bulky pairwise alignments go to their own files (skip
+them all with `--no-alignments`).
 
 - **`.txt`** — human-readable: a fixed-width table of every hit (query, species,
   target, **both** identity ratios, alignment length, bit score, E-value,
@@ -141,8 +143,29 @@ their own files (skip them all with `--no-alignments`).
   per-species database provenance, full effective parameters, software versions,
   references, a **chance-reference** section with the `k*` formula + `p` + per-species
   `M`/`k*`, and a ready-to-paste Methods paragraph).
+- **`_executive_summary.txt`** — *only with `--exec-summary`.* A plain-language
+  roll-up for a non-specialist reader (see below).
 
 > E-value is reported for reference only; it is never used to filter results.
+
+### Executive summary
+
+`--exec-summary` writes `<prefix>_executive_summary.txt`, a self-contained,
+plain-language report. For **each construct (`seq`) in each species** it shows:
+
+- the **strongest match** — the single protein that construct most resembles by
+  chance (ranked by *% of query identical*, then longer alignment, lower E-value,
+  earlier subject position), drawn as a **full-query alignment** so the flanks of
+  the fusion that *don't* match are visible, not just the aligned core; and
+- **up to five distinct proteins** it resembles, collapsed by target so one protein
+  isn't listed five times, each with its **E-value** — so a biologically meaningful
+  hit (low E-value) is easy to tell from a chance match (E-value near 1).
+
+The report is laid out at a fixed 100-column width. It requires junction-style query
+IDs of the form
+`source|seq|motif_N|start_end` — exactly what `extract_junctions.py` produces. If a
+run's IDs don't match, the file is skipped with a warning (the rest of the run is
+unaffected).
 
 ---
 
