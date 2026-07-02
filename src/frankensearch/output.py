@@ -875,9 +875,11 @@ def write_summary(
         ),
         *(
             [
-                "- Executive summary (`_executive_summary.txt`): per-construct strongest "
-                "match + up to 5 distinct target proteins per species (requires "
-                "junction-style query IDs)"
+                "- Executive summary (`_executive_summary.txt`): a per-species overview "
+                "table (constructs with a junction at each identity level) plus, per "
+                "construct, the strongest match + up to 5 distinct target proteins per "
+                "species; with --filter-by, a cutoff table and >= flags on passing "
+                "matches (requires junction-style query IDs)"
             ]
             if params.exec_summary
             else []
@@ -970,6 +972,15 @@ _EXEC_WIDTH = 100
 # a few residues onto a second.
 _EXEC_ALN_WIDTH = _EXEC_WIDTH - 30
 
+# Overview-table layout: a truncated species-name column, the taxid, then the count
+# columns. Chosen so even the widest table (the four-level landscape) stays within
+# _EXEC_WIDTH.
+_EXEC_TABLE_NAME_W = 50
+
+# "Landscape" identity levels (fraction of the query identical) for the always-on
+# overview table. 1.0 renders as "=100%", the others as ">=NN%".
+_EXEC_LANDSCAPE_LEVELS = (0.5, 0.7, 0.9, 1.0)
+
 
 def parse_junction_label(query_id: str) -> JunctionLabel | None:
     """Parse an ``extract_junctions.py`` query id, or return ``None`` when it does
@@ -1011,6 +1022,33 @@ def _exec_sort_key(hit: Hit) -> tuple:
     return (hit.identity_over_query, hit.align_len, -hit.evalue, -hit.sstart)
 
 
+def _exec_cutoff(params: SearchParams) -> tuple[str, float] | None:
+    """The ``--filter-by`` cutoff as ``(display, value)`` for flagging exec matches, or
+    ``None`` when ``--filter-by`` is unset. ``value`` is compared with
+    ``rank_metric(hit, params.rank_by)`` -- the same metric the ``_filtered_by`` files
+    use -- so a flagged match is exactly one that would survive that filter."""
+    if params.filter_by is None:
+        return None
+    if params.rank_by == "alignment-length":
+        return (f"{params.filter_by:g} residues", params.filter_by)
+    return (f"{params.filter_by * 100:g}%", params.filter_by)
+
+
+def _count_constructs(
+    constructs: list[tuple[str, str]],
+    taxid: int,
+    by_seq_species: dict[tuple[str, str, int], list[Hit]],
+    predicate: Callable[[Hit], bool],
+) -> int:
+    """How many of ``constructs`` have at least one junction in ``taxid`` whose hit
+    satisfies ``predicate`` (the numerator of an overview-table cell)."""
+    return sum(
+        1
+        for source, seq in constructs
+        if any(predicate(hit) for hit in by_seq_species.get((source, seq, taxid), []))
+    )
+
+
 def _full_query_alignment(hit: Hit, width: int = _EXEC_ALN_WIDTH) -> list[str]:
     """A pairwise alignment drawn against the COMPLETE query sequence: residues of
     the construct outside the matched region (the fusion's non-matching flanks) are
@@ -1046,15 +1084,19 @@ def _full_query_alignment(hit: Hit, width: int = _EXEC_ALN_WIDTH) -> list[str]:
     return lines
 
 
-def _exec_best_match(hit: Hit) -> list[str]:
+def _exec_best_match(hit: Hit, cutoff: tuple[str, float] | None, rank_by: str) -> list[str]:
     """The headline block for one (construct, species): the strongest match with a
-    full-query alignment."""
+    full-query alignment. When ``--filter-by`` is set and this match clears it, the
+    heading is tagged so the reader sees at a glance that it passes the cutoff."""
     label = parse_junction_label(hit.query_id)
     motif = label.motif if label else "?"
     span = f"{label.start}-{label.end}" if label else "?"
+    heading = "    STRONGEST MATCH"
+    if cutoff is not None and rank_metric(hit, rank_by) >= cutoff[1]:
+        heading += f"   [>= --filter-by cutoff of {cutoff[0]}]"
     block = [
         "",
-        "    STRONGEST MATCH",
+        heading,
         f"      Protein : {_truncate(hit.target_name, 68)}  ({hit.accession})",
         f"      Identity: {hit.identity_over_query * 100:.0f}% of the query is identical to "
         f"this protein ({hit.nident} of {hit.query_len} residues)",
@@ -1067,15 +1109,19 @@ def _exec_best_match(hit: Hit) -> list[str]:
     return block
 
 
-def _exec_other_targets(reps: list[Hit]) -> list[str]:
+def _exec_other_targets(
+    reps: list[Hit], cutoff: tuple[str, float] | None, rank_by: str
+) -> list[str]:
     """The compact ranked list of up to five distinct proteins the construct
     resembles. The E-value column lets the reader tell biologically meaningful hits
     (low E-value) from chance matches (E-value near 1). Row 1 is the headline,
-    flagged with ``*`` (shown in full above)."""
+    flagged with ``*`` (shown in full above). When ``--filter-by`` is set, a leading
+    ``>=`` column marks every row at or above the cutoff."""
+    flag = "    " if cutoff is not None else ""  # 4-col marker gutter, only when filtering
     lines = [
         "",
         "    TOP DISTINCT PROTEINS THIS CONSTRUCT RESEMBLES  (ranked by % of query identical)",
-        f"      {'%qry':>5}  {'E-value':>8}  {'Protein':<40}  {'Accession':<10}  Junction",
+        f"      {flag}{'%qry':>5}  {'E-value':>8}  {'Protein':<40}  {'Accession':<10}  Junction",
     ]
     for rank, hit in enumerate(reps, start=1):
         label = parse_junction_label(hit.query_id)
@@ -1084,7 +1130,11 @@ def _exec_other_targets(reps: list[Hit]) -> list[str]:
         evalue = f"{hit.evalue:.1e}"
         name = _truncate(hit.target_name, 40)
         mark = " *" if rank == 1 else ""
-        lines.append(f"      {pct:>5}  {evalue:>8}  {name:<40}  {hit.accession:<10}  {motif}{mark}")
+        if cutoff is not None:
+            flag = ">=  " if rank_metric(hit, rank_by) >= cutoff[1] else "    "
+        lines.append(
+            f"      {flag}{pct:>5}  {evalue:>8}  {name:<40}  {hit.accession:<10}  {motif}{mark}"
+        )
     lines.append("      * strongest match, shown in full above")
     return lines
 
@@ -1094,6 +1144,8 @@ def _exec_construct_block(
     seq: str,
     taxa: list[Taxon],
     by_seq_species: dict[tuple[str, str, int], list[Hit]],
+    cutoff: tuple[str, float] | None,
+    rank_by: str,
 ) -> list[str]:
     """The full block for one construct: a per-species headline + top-5 list."""
     rule = "=" * _EXEC_WIDTH
@@ -1114,8 +1166,92 @@ def _exec_construct_block(
             reps.append(hit)
             if len(reps) == 5:
                 break
-        lines += _exec_best_match(reps[0])
-        lines += _exec_other_targets(reps)
+        lines += _exec_best_match(reps[0], cutoff, rank_by)
+        lines += _exec_other_targets(reps, cutoff, rank_by)
+    return lines
+
+
+def _exec_landscape_table(
+    constructs: list[tuple[str, str]],
+    taxa: list[Taxon],
+    by_seq_species: dict[tuple[str, str, int], list[Hit]],
+) -> list[str]:
+    """Overview table (always shown): per species, how many constructs have at least
+    one junction reaching each identity level (% of query identical). Needs no
+    configuration -- the at-a-glance landscape, independent of --filter-by."""
+    levels = _EXEC_LANDSCAPE_LEVELS
+    heads = ["=100%" if lvl >= 1.0 else f">={lvl * 100:g}%" for lvl in levels]
+    rule = "=" * _EXEC_WIDTH
+    lines = [
+        "",
+        rule,
+        "OVERVIEW — HOW MANY CONSTRUCTS HAVE A STRONG MATCH, BY SPECIES",
+        f'Constructs with >=1 junction reaching each "% of query identical" level '
+        f"(of {len(constructs)} searched).",
+        rule,
+        f"  {'Species':<{_EXEC_TABLE_NAME_W}}  {'Taxid':>8}"
+        + "".join(f"   {h:>5}" for h in heads),
+        f"  {'-' * _EXEC_TABLE_NAME_W}  {'-' * 8}" + "   -----" * len(levels),
+    ]
+    for taxon in taxa:
+        name = _truncate(taxon.name, _EXEC_TABLE_NAME_W)
+        counts = [
+            _count_constructs(
+                constructs,
+                taxon.taxid,
+                by_seq_species,
+                lambda h, lvl=lvl: h.identity_over_query >= lvl,
+            )
+            for lvl in levels
+        ]
+        lines.append(
+            f"  {name:<{_EXEC_TABLE_NAME_W}}  {taxon.taxid:>8}"
+            + "".join(f"   {c:>5}" for c in counts)
+        )
+    lines.append(rule)
+    return lines
+
+
+def _exec_filter_table(
+    constructs: list[tuple[str, str]],
+    taxa: list[Taxon],
+    by_seq_species: dict[tuple[str, str, int], list[Hit]],
+    params: SearchParams,
+) -> list[str]:
+    """Overview table shown only when --filter-by is set: per species, how many
+    constructs have >=1 junction passing the cutoff on the active --rank-by metric (so
+    it agrees with the _filtered_by files and the >= flags in the construct blocks)."""
+    label, value = _exec_cutoff(params)  # caller builds this only when --filter-by is set
+    rank_by = params.rank_by
+    metric_name = _RANK_LABELS.get(rank_by, _RANK_LABELS["identity-alignment"])
+    total = len(constructs)
+    rule = "=" * _EXEC_WIDTH
+    lines = [
+        "",
+        rule,
+        "OVERVIEW — CONSTRUCTS PASSING THE --filter-by CUTOFF, BY SPECIES",
+        f"At least one junction with {metric_name} >= {label}  "
+        f"(--filter-by {params.filter_by:g}).  Of {total} searched.",
+        rule,
+        f"  {'Species':<{_EXEC_TABLE_NAME_W}}  {'Taxid':>8}   "
+        f"{'Constructs w/ match':^19}   {'%':>6}",
+        f"  {'-' * _EXEC_TABLE_NAME_W}  {'-' * 8}   {'-' * 19}   {'-' * 6}",
+    ]
+    for taxon in taxa:
+        name = _truncate(taxon.name, _EXEC_TABLE_NAME_W)
+        n = _count_constructs(
+            constructs,
+            taxon.taxid,
+            by_seq_species,
+            lambda h: rank_metric(h, rank_by) >= value,
+        )
+        count_str = f"{n} of {total}"
+        pct = f"{100 * n / total:.1f}%" if total else "n/a"
+        lines.append(
+            f"  {name:<{_EXEC_TABLE_NAME_W}}  {taxon.taxid:>8}   {count_str:^19}   {pct:>6}"
+        )
+    lines.append(rule)
+    lines.append(f'In the per-construct lists below, ">=" flags each match at or above {label}.')
     return lines
 
 
@@ -1166,24 +1302,32 @@ def write_exec_summary(
             continue  # non-junction ids are ignored (caller should have gated already)
         by_seq_species.setdefault((label.source, label.seq, hit.taxid), []).append(hit)
 
-    # Construct order = first appearance in the query list; keep only constructs that
-    # produced at least one hit in at least one species.
-    seq_order: list[tuple[str, str]] = []
+    # Every construct searched (distinct source|seq among junction queries, in
+    # first-appearance order) -- the denominator for the overview tables. seq_order is
+    # the subset that produced hits, which the per-construct sections then cover.
+    all_constructs: list[tuple[str, str]] = []
     seen_seq: set[tuple[str, str]] = set()
     for query in queries:
         label = parse_junction_label(query.id)
         if label is None:
             continue
         key = (label.source, label.seq)
-        if key in seen_seq:
-            continue
-        seen_seq.add(key)
-        if any((label.source, label.seq, t.taxid) in by_seq_species for t in taxa):
-            seq_order.append(key)
+        if key not in seen_seq:
+            seen_seq.add(key)
+            all_constructs.append(key)
+    seq_order = [
+        key
+        for key in all_constructs
+        if any((key[0], key[1], t.taxid) in by_seq_species for t in taxa)
+    ]
 
+    cutoff = _exec_cutoff(params)
     lines = _exec_header(params, input_path, taxa)
+    lines += _exec_landscape_table(all_constructs, taxa, by_seq_species)
+    if cutoff is not None:
+        lines += _exec_filter_table(all_constructs, taxa, by_seq_species, params)
     for source, seq in seq_order:
-        lines += _exec_construct_block(source, seq, taxa, by_seq_species)
+        lines += _exec_construct_block(source, seq, taxa, by_seq_species, cutoff, params.rank_by)
     if not seq_order:
         lines += ["", "(no constructs had any hits to summarise)"]
     else:

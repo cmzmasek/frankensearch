@@ -165,9 +165,11 @@ def search(
     exec_summary: bool = typer.Option(
         False,
         "--exec-summary",
-        help="Also write <prefix>_executive_summary.txt: a plain-language, per-construct "
-        "roll-up (strongest match + up to 5 distinct proteins per species, with a "
-        "full-query alignment). Needs junction-style query IDs "
+        help="Also write <prefix>_executive_summary.txt: a plain-language roll-up. An "
+        "overview table counts, per species, how many constructs have a junction at "
+        "each identity level; then per construct, the strongest match + up to 5 distinct "
+        "proteins, with a full-query alignment. With --filter-by, adds a cutoff table "
+        "and flags matches that clear it. Needs junction-style query IDs "
         "(file|seq|motif_N|start_end, as produced by extract_junctions.py).",
     ),
     ungapped: bool = typer.Option(False, "--ungapped", help="Only ungapped alignments."),

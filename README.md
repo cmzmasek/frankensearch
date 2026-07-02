@@ -151,7 +151,10 @@ them all with `--no-alignments`).
 ### Executive summary
 
 `--exec-summary` writes `<prefix>_executive_summary.txt`, a self-contained,
-plain-language report. For **each construct (`seq`) in each species** it shows:
+plain-language report. It opens with an **overview table** — per species, how many
+constructs have at least one junction reaching each *% of query identical* level
+(`>=50 / >=70 / >=90 / =100%`), out of all constructs searched. Then, for **each
+construct (`seq`) in each species**, it shows:
 
 - the **strongest match** — the single protein that construct most resembles by
   chance (ranked by *% of query identical*, then longer alignment, lower E-value,
@@ -161,7 +164,10 @@ plain-language report. For **each construct (`seq`) in each species** it shows:
   isn't listed five times, each with its **E-value** — so a biologically meaningful
   hit (low E-value) is easy to tell from a chance match (E-value near 1).
 
-The report is laid out at a fixed 100-column width. It requires junction-style query
+With `--filter-by`, a second overview table counts constructs that clear the cutoff
+(on the active `--rank-by` metric), and every shown match at or above it is flagged
+(`>=` in the list, a tag on the strongest-match heading). The report is laid out at
+a fixed 100-column width. It requires junction-style query
 IDs of the form
 `source|seq|motif_N|start_end` — exactly what `extract_junctions.py` produces. If a
 run's IDs don't match, the file is skipped with a warning (the rest of the run is

@@ -643,6 +643,56 @@ def test_full_query_alignment_uses_wide_lines_within_100():
     assert all(len("      " + line) <= 100 for line in lines)
 
 
+def test_exec_summary_landscape_table_always_present(tmp_path):
+    # Overview table B is always written (no --filter-by needed) and its denominator
+    # counts EVERY construct searched, including seq3 which had no hits at all.
+    path = tmp_path / "r_executive_summary.txt"
+    queries = [Query(f"s.tsv|seq{i}|motif_{i}|1_20", FULL_Q) for i in (1, 2, 3)]
+    hits = [
+        _jhit("motif_1", seq="seq1", taxid=9606, species="Homo sapiens", nident=15),  # 0.75
+        _jhit("motif_1", seq="seq1", taxid=10090, species="Mus musculus", nident=5),  # 0.25
+        _jhit("motif_2", seq="seq2", taxid=10090, species="Mus musculus", nident=20),  # 1.00
+    ]
+    output.write_exec_summary(
+        path, hits, queries=queries, taxa=[TAXON, MOUSE],
+        params=SearchParams(exec_summary=True), input_path=tmp_path / "in.fasta",
+    )
+    text = path.read_text()
+    assert "HOW MANY CONSTRUCTS HAVE A STRONG MATCH" in text
+    assert "of 3 searched" in text  # seq3 (no hits) still counted in the denominator
+    assert "PASSING THE --filter-by CUTOFF" not in text  # table A only with --filter-by
+    rows = {ln.split()[0] + " " + ln.split()[1]: ln.split() for ln in text.splitlines()
+            if ln.startswith("  Homo") or ln.startswith("  Mus")}
+    assert rows["Homo sapiens"][-4:] == ["1", "1", "0", "0"]  # >=50/70/90/100
+    assert rows["Mus musculus"][-4:] == ["1", "1", "1", "1"]
+
+
+def test_exec_summary_filter_table_and_flags(tmp_path):
+    # With --filter-by, table A appears (metric = active --rank-by) and every shown
+    # match at/above the cutoff is flagged: the STRONGEST MATCH heading is tagged and
+    # the list row carries a leading ">=".
+    path = tmp_path / "r_executive_summary.txt"
+    queries = [Query(f"s.tsv|seq{i}|motif_{i}|1_20", FULL_Q) for i in (1, 2, 3)]
+    hits = [
+        _jhit("motif_1", seq="seq1", taxid=9606, species="Homo sapiens", nident=15),  # 0.75 pass
+        _jhit("motif_1", seq="seq1", taxid=10090, species="Mus musculus", nident=5),  # 0.25 fail
+        _jhit("motif_2", seq="seq2", taxid=10090, species="Mus musculus", nident=20),  # 1.00 pass
+    ]
+    output.write_exec_summary(
+        path, hits, queries=queries, taxa=[TAXON, MOUSE],
+        params=SearchParams(exec_summary=True, filter_by=0.7), input_path=tmp_path / "in.fasta",
+    )
+    text = path.read_text()
+    assert "PASSING THE --filter-by CUTOFF" in text
+    assert "identity over query length >= 70%" in text
+    assert 'flags each match at or above 70%' in text
+    assert "1 of 3" in text and "33.3%" in text
+    # Two best hits clear 0.7 (seq1/human 0.75, seq2/mouse 1.0); seq1/mouse 0.25 does not.
+    assert text.count("[>= --filter-by cutoff of 70%]") == 2
+    assert ">=   75.0" in text and ">=  100.0" in text  # flagged rows
+    assert ">=   25.0" not in text  # the sub-threshold row is not flagged
+
+
 def test_write_outputs_with_exec_summary_writes_extra_file(tmp_path):
     out_prefix = tmp_path / "r"
     queries = [Query("s.tsv|seq1|motif_1|1_20", FULL_Q)]
