@@ -322,7 +322,9 @@ def write_outputs(
             params=params,
             input_path=input_path,
         )
-        written.append(exec_path)
+        matrix_path = exec_matrix_output_path(out_prefix)
+        write_exec_matrix(matrix_path, hits, queries=queries, taxa=taxa)
+        written += [exec_path, matrix_path]
 
     return tuple(written)
 
@@ -879,7 +881,9 @@ def write_summary(
                 "table (constructs with a junction at each identity level) plus, per "
                 "construct, the strongest match + up to 5 distinct target proteins per "
                 "species; with --filter-by, a cutoff table and >= flags on passing "
-                "matches (requires junction-style query IDs)"
+                "matches. A companion `_executive_summary_matrix.tsv` gives the "
+                "construct x species matrix of highest % of query identical (requires "
+                "junction-style query IDs)"
             ]
             if params.exec_summary
             else []
@@ -1005,6 +1009,11 @@ def labels_are_junctions(queries: list[Query]) -> bool:
 def exec_summary_output_path(out_prefix: Path) -> Path:
     """The executive-summary file: _executive_summary.txt."""
     return out_prefix.parent / f"{out_prefix.name}_executive_summary.txt"
+
+
+def exec_matrix_output_path(out_prefix: Path) -> Path:
+    """The executive-summary matrix: _executive_summary_matrix.tsv."""
+    return out_prefix.parent / f"{out_prefix.name}_executive_summary_matrix.tsv"
 
 
 def _fit_species(prefix: str, taxon: Taxon, gap: str = " ") -> str:
@@ -1282,6 +1291,62 @@ def _exec_header(params: SearchParams, input_path: Path, taxa: list[Taxon]) -> l
     return lines
 
 
+def _exec_group_by_construct(hits: list[Hit]) -> dict[tuple[str, str, int], list[Hit]]:
+    """Group hits by (source, seq, taxid) -- construct x species -- via the junction
+    label parsed from each hit's query id. Non-junction ids are skipped (the caller is
+    expected to have gated on ``labels_are_junctions``)."""
+    grouped: dict[tuple[str, str, int], list[Hit]] = {}
+    for hit in hits:
+        label = parse_junction_label(hit.query_id)
+        if label is None:
+            continue
+        grouped.setdefault((label.source, label.seq, hit.taxid), []).append(hit)
+    return grouped
+
+
+def _exec_construct_order(queries: list[Query]) -> list[tuple[str, str]]:
+    """Distinct (source, seq) constructs in first-appearance order -- the full
+    population searched, including constructs that produced no hits."""
+    order: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for query in queries:
+        label = parse_junction_label(query.id)
+        if label is None:
+            continue
+        key = (label.source, label.seq)
+        if key not in seen:
+            seen.add(key)
+            order.append(key)
+    return order
+
+
+def write_exec_matrix(
+    path: Path,
+    hits: list[Hit],
+    *,
+    queries: list[Query],
+    taxa: list[Taxon],
+) -> None:
+    """Write the construct x species matrix TSV: one row per construct (seq, in input
+    order, including no-hit constructs), one column per species, each cell the single
+    highest "% of query identical" any junction of that construct reached against that
+    species (``0`` when nothing hit). A spreadsheet-friendly pivot of the executive
+    summary. Requires junction-style query ids; callers gate on ``labels_are_junctions``."""
+    by_construct = _exec_group_by_construct(hits)
+    constructs = _exec_construct_order(queries)
+    multi_source = len({source for source, _ in constructs}) > 1
+
+    rows = ["\t".join(["construct", *(t.name for t in taxa)])]
+    for source, seq in constructs:
+        label = f"{source}|{seq}" if multi_source else seq
+        cells = [label]
+        for taxon in taxa:
+            group = by_construct.get((source, seq, taxon.taxid), [])
+            cells.append(f"{max(h.identity_over_query for h in group) * 100:.1f}" if group else "0")
+        rows.append("\t".join(cells))
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+
 def write_exec_summary(
     path: Path,
     hits: list[Hit],
@@ -1295,26 +1360,11 @@ def write_exec_summary(
     single strongest chance-similarity match (with a full-query alignment) plus up to
     five distinct target proteins it resembles. Requires junction-style query ids
     (see ``parse_junction_label``); callers gate on ``labels_are_junctions``."""
-    by_seq_species: dict[tuple[str, str, int], list[Hit]] = {}
-    for hit in hits:
-        label = parse_junction_label(hit.query_id)
-        if label is None:
-            continue  # non-junction ids are ignored (caller should have gated already)
-        by_seq_species.setdefault((label.source, label.seq, hit.taxid), []).append(hit)
-
-    # Every construct searched (distinct source|seq among junction queries, in
-    # first-appearance order) -- the denominator for the overview tables. seq_order is
-    # the subset that produced hits, which the per-construct sections then cover.
-    all_constructs: list[tuple[str, str]] = []
-    seen_seq: set[tuple[str, str]] = set()
-    for query in queries:
-        label = parse_junction_label(query.id)
-        if label is None:
-            continue
-        key = (label.source, label.seq)
-        if key not in seen_seq:
-            seen_seq.add(key)
-            all_constructs.append(key)
+    by_seq_species = _exec_group_by_construct(hits)
+    # Every construct searched (distinct source|seq, first-appearance order) is the
+    # denominator for the overview tables; seq_order is the subset that produced hits,
+    # which the per-construct sections then cover.
+    all_constructs = _exec_construct_order(queries)
     seq_order = [
         key
         for key in all_constructs

@@ -84,7 +84,7 @@ drowns out another.
 | `--matrix {identity,pam30,blosum45,blosum62}` | Scoring matrix; `identity` (built-in pure-identity) is the default. |
 | `--no-alignments` | Skip all pairwise alignment output (no `_alignments.txt`; `_top1`/`_filtered` `.txt` become table-only). The compact `match` column is kept. |
 | `--output-query` | Also report the full query sequence (in addition to its name): a `query_sequence` column in the `.tsv` files and a `Query-Seq` column in the `.txt` HITS tables. |
-| `--exec-summary` | Also write `<prefix>_executive_summary.txt`: a plain-language, per-construct roll-up — each construct's strongest match plus up to five distinct proteins it resembles, per species, with a full-query alignment. Needs junction-style query IDs (as produced by `extract_junctions.py`); skipped with a warning otherwise. See [Executive summary](#executive-summary). |
+| `--exec-summary` | Also write `<prefix>_executive_summary.txt` (a plain-language, per-construct roll-up — each construct's strongest match plus up to five distinct proteins it resembles, per species, with a full-query alignment) and `<prefix>_executive_summary_matrix.tsv` (a construct × species matrix of highest % of query identical). Needs junction-style query IDs (as produced by `extract_junctions.py`); skipped with a warning otherwise. See [Executive summary](#executive-summary). |
 | `--ungapped` | Ungapped alignments only. |
 | `--remote` | Search NCBI remotely instead of using local databases (see below). |
 | `-o, --output` | Output path prefix (defaults to the input file's name). |
@@ -103,7 +103,7 @@ drowns out another.
 
 ## Output
 
-Seven files are written per run (nine with `--filter-by`, plus one with
+Seven files are written per run (nine with `--filter-by`, plus two with
 `--exec-summary`), sharing the `-o/--output` prefix. The table outputs
 (`.txt`/`.tsv`) are kept **compact** (one row per hit) so they stay manageable for
 large, many-query runs; the bulky pairwise alignments go to their own files (skip
@@ -145,6 +145,12 @@ them all with `--no-alignments`).
   `M`/`k*`, and a ready-to-paste Methods paragraph).
 - **`_executive_summary.txt`** — *only with `--exec-summary`.* A plain-language
   roll-up for a non-specialist reader (see below).
+- **`_executive_summary_matrix.tsv`** — *only with `--exec-summary`.* A
+  construct × species matrix: one row per construct, one column per species, each
+  cell the highest *% of query identical* that construct reached against that
+  species (`0` when nothing hit). A spreadsheet-friendly pivot of the executive
+  summary — ideal for spotting a construct that matches its positive-control
+  species but nothing else.
 
 > E-value is reported for reference only; it is never used to filter results.
 
@@ -172,6 +178,13 @@ IDs of the form
 `source|seq|motif_N|start_end` — exactly what `extract_junctions.py` produces. If a
 run's IDs don't match, the file is skipped with a warning (the rest of the run is
 unaffected).
+
+Alongside it, `--exec-summary` also writes **`<prefix>_executive_summary_matrix.tsv`**
+— the same information as a compact **construct × species matrix**: one row per
+construct, one column per species, each cell the highest *% of query identical* any
+of that construct's junctions reached against that species (`0` for no hit). Open it
+in Excel to scan for the design goal at a glance — high in the intended
+(positive-control) species, near-zero elsewhere.
 
 ---
 

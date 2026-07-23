@@ -693,6 +693,44 @@ def test_exec_summary_filter_table_and_flags(tmp_path):
     assert ">=   25.0" not in text  # the sub-threshold row is not flagged
 
 
+def test_write_exec_matrix_values_and_no_hit(tmp_path):
+    path = tmp_path / "r_executive_summary_matrix.tsv"
+    hits = [
+        _jhit("motif_1", seq="seq1", nident=10),  # seq1 x human 50%
+        _jhit("motif_2", seq="seq1", nident=15, align_len=15, qend=15),  # seq1 x human 75% (max)
+        _jhit("motif_1", seq="seq1", taxid=10090, species="Mus musculus", nident=6),  # mouse 30%
+        _jhit("motif_1", seq="seq2", nident=20, align_len=20, qend=20),  # seq2 x human 100%
+    ]
+    queries = [
+        Query("s.tsv|seq1|motif_1|1_20", FULL_Q),
+        Query("s.tsv|seq2|motif_1|1_20", FULL_Q),
+        Query("s.tsv|seq3|motif_1|1_20", FULL_Q),  # searched but no hits at all
+    ]
+    output.write_exec_matrix(path, hits, queries=queries, taxa=[TAXON, MOUSE])
+    rows = [line.split("\t") for line in path.read_text().splitlines()]
+    assert rows[0] == ["construct", "Homo sapiens", "Mus musculus"]
+    matrix = {r[0]: r[1:] for r in rows[1:]}
+    assert matrix["seq1"] == ["75.0", "30.0"]  # highest %id/qry over junctions, per species
+    assert matrix["seq2"] == ["100.0", "0"]  # no mouse hit -> 0
+    assert matrix["seq3"] == ["0", "0"]  # no hits anywhere, still a row
+    assert [r[0] for r in rows[1:]] == ["seq1", "seq2", "seq3"]  # input (query) order
+
+
+def test_write_exec_matrix_qualifies_labels_across_sources(tmp_path):
+    path = tmp_path / "r_executive_summary_matrix.tsv"
+    hits = [
+        _jhit("motif_1", source="a.tsv", seq="seq1", nident=10),
+        _jhit("motif_1", source="b.tsv", seq="seq1", nident=20, align_len=20, qend=20),
+    ]
+    queries = [
+        Query("a.tsv|seq1|motif_1|1_20", FULL_Q),
+        Query("b.tsv|seq1|motif_1|1_20", FULL_Q),
+    ]
+    output.write_exec_matrix(path, hits, queries=queries, taxa=[TAXON])
+    labels = [line.split("\t")[0] for line in path.read_text().splitlines()[1:]]
+    assert labels == ["a.tsv|seq1", "b.tsv|seq1"]  # same seq, two sources -> source-qualified
+
+
 def test_write_outputs_with_exec_summary_writes_extra_file(tmp_path):
     out_prefix = tmp_path / "r"
     queries = [Query("s.tsv|seq1|motif_1|1_20", FULL_Q)]
@@ -712,3 +750,6 @@ def test_write_outputs_with_exec_summary_writes_extra_file(tmp_path):
     exec_path = output.exec_summary_output_path(out_prefix)
     assert exec_path in written
     assert exec_path.exists()
+    matrix_path = output.exec_matrix_output_path(out_prefix)
+    assert matrix_path in written
+    assert matrix_path.exists()

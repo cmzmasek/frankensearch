@@ -19,6 +19,7 @@ from .output import (
     HIT_COLUMNS,
     alignments_output_path,
     cell_text,
+    exec_matrix_output_path,
     exec_summary_output_path,
     filtered_output_paths,
     hit_column_header,
@@ -169,8 +170,9 @@ def search(
         "overview table counts, per species, how many constructs have a junction at "
         "each identity level; then per construct, the strongest match + up to 5 distinct "
         "proteins, with a full-query alignment. With --filter-by, adds a cutoff table "
-        "and flags matches that clear it. Needs junction-style query IDs "
-        "(file|seq|motif_N|start_end, as produced by extract_junctions.py).",
+        "and flags matches that clear it. A companion <prefix>_executive_summary_matrix.tsv "
+        "gives the construct x species matrix of highest % of query identical. Needs "
+        "junction-style query IDs (file|seq|motif_N|start_end, from extract_junctions.py).",
     ),
     ungapped: bool = typer.Option(False, "--ungapped", help="Only ungapped alignments."),
     seg: bool = typer.Option(
@@ -295,6 +297,7 @@ def search(
         all_output_paths += list(filtered_output_paths(out_prefix, filter_by))
     if exec_summary_ok:
         all_output_paths.append(exec_summary_output_path(out_prefix))
+        all_output_paths.append(exec_matrix_output_path(out_prefix))
     all_output_paths = tuple(all_output_paths)
     table.add_row("Outputs", "\n".join(str(p) for p in all_output_paths))
     console.print(table)
